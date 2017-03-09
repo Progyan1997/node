@@ -1,37 +1,55 @@
 'use strict';
-var common = require('../common.js');
-var assert = require('assert');
-var bench = common.createBenchmark(main, {
-  prim: [
-    null,
-    undefined,
-    'a',
-    1,
-    true,
-    {0: 'a'},
-    [1, 2, 3],
-    new Array([1, 2, 3])
-  ],
-  n: [25]
+const common = require('../common.js');
+const assert = require('assert');
+
+const primValues = {
+  'null': null,
+  'undefined': undefined,
+  'string': 'a',
+  'number': 1,
+  'boolean': true,
+  'object': { 0: 'a' },
+  'array': [1, 2, 3],
+  'new-array': new Array([1, 2, 3])
+};
+
+const bench = common.createBenchmark(main, {
+  prim: Object.keys(primValues),
+  n: [25],
+  len: [1e5],
+  method: ['strict', 'nonstrict']
 });
 
 function main(conf) {
-  var prim = conf.prim;
-  var n = +conf.n;
-  var primArray;
-  var primArrayCompare;
-  var x;
+  const prim = primValues[conf.prim];
+  const n = +conf.n;
+  const len = +conf.len;
+  const actual = [];
+  const expected = [];
+  var i;
 
-  primArray = new Array();
-  primArrayCompare = new Array();
-  for (x = 0; x < (1e5); x++) {
-    primArray.push(prim);
-    primArrayCompare.push(prim);
+  for (var x = 0; x < len; x++) {
+    actual.push(prim);
+    expected.push(prim);
   }
 
-  bench.start();
-  for (x = 0; x < n; x++) {
-    assert.deepEqual(primArray, primArrayCompare);
+  switch (conf.method) {
+    case 'strict':
+      bench.start();
+      for (i = 0; i < n; ++i) {
+        // eslint-disable-next-line no-restricted-properties
+        assert.deepEqual(actual, expected);
+      }
+      bench.end(n);
+      break;
+    case 'nonstrict':
+      bench.start();
+      for (i = 0; i < n; ++i) {
+        assert.deepStrictEqual(actual, expected);
+      }
+      bench.end(n);
+      break;
+    default:
+      throw new Error('Unsupported method');
   }
-  bench.end(n);
 }

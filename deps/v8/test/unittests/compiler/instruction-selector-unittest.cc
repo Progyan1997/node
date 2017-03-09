@@ -4,6 +4,8 @@
 
 #include "test/unittests/compiler/instruction-selector-unittest.h"
 
+#include "src/code-factory.h"
+#include "src/compiler/compiler-source-position-table.h"
 #include "src/compiler/graph.h"
 #include "src/compiler/schedule.h"
 #include "src/flags.h"
@@ -12,12 +14,6 @@
 namespace v8 {
 namespace internal {
 namespace compiler {
-
-namespace {
-
-typedef RawMachineAssembler::Label MLabel;
-
-}  // namespace
 
 
 InstructionSelectorTest::InstructionSelectorTest() : rng_(FLAG_random_seed) {}
@@ -45,13 +41,14 @@ InstructionSelectorTest::Stream InstructionSelectorTest::StreamBuilder::Build(
                                instruction_blocks);
   SourcePositionTable source_position_table(graph());
   InstructionSelector selector(test_->zone(), node_count, &linkage, &sequence,
-                               schedule, &source_position_table,
-                               source_position_mode, features);
+                               schedule, &source_position_table, nullptr,
+                               source_position_mode, features,
+                               InstructionSelector::kDisableScheduling);
   selector.SelectInstructions();
   if (FLAG_trace_turbo) {
     OFStream out(stdout);
-    PrintableInstructionSequence printable = {
-        RegisterConfiguration::ArchDefault(), &sequence};
+    PrintableInstructionSequence printable = {RegisterConfiguration::Turbofan(),
+                                              &sequence};
     out << "=== Code sequence after instruction selection ===" << std::endl
         << printable;
   }
@@ -98,18 +95,18 @@ InstructionSelectorTest::Stream InstructionSelectorTest::StreamBuilder::Build(
   }
   for (auto i : s.virtual_registers_) {
     int const virtual_register = i.second;
-    if (sequence.IsFloat(virtual_register)) {
+    if (sequence.IsFP(virtual_register)) {
       EXPECT_FALSE(sequence.IsReference(virtual_register));
       s.doubles_.insert(virtual_register);
     }
     if (sequence.IsReference(virtual_register)) {
-      EXPECT_FALSE(sequence.IsFloat(virtual_register));
+      EXPECT_FALSE(sequence.IsFP(virtual_register));
       s.references_.insert(virtual_register);
     }
   }
-  for (int i = 0; i < sequence.GetFrameStateDescriptorCount(); i++) {
-    s.deoptimization_entries_.push_back(sequence.GetFrameStateDescriptor(
-        InstructionSequence::StateId::FromInt(i)));
+  for (int i = 0; i < sequence.GetDeoptimizationEntryCount(); i++) {
+    s.deoptimization_entries_.push_back(
+        sequence.GetDeoptimizationEntry(i).descriptor());
   }
   return s;
 }
@@ -127,8 +124,7 @@ bool InstructionSelectorTest::Stream::IsFixed(const InstructionOperand* operand,
   if (!operand->IsUnallocated()) return false;
   const UnallocatedOperand* unallocated = UnallocatedOperand::cast(operand);
   if (!unallocated->HasFixedRegisterPolicy()) return false;
-  const int index = Register::ToAllocationIndex(reg);
-  return unallocated->fixed_register_index() == index;
+  return unallocated->fixed_register_index() == reg.code();
 }
 
 
@@ -153,7 +149,7 @@ InstructionSelectorTest::StreamBuilder::GetFrameStateFunctionInfo(
     int parameter_count, int local_count) {
   return common()->CreateFrameStateFunctionInfo(
       FrameStateType::kJavaScriptFunction, parameter_count, local_count,
-      Handle<SharedFunctionInfo>(), CALL_MAINTAINS_NATIVE_CONTEXT);
+      Handle<SharedFunctionInfo>());
 }
 
 
@@ -163,7 +159,7 @@ InstructionSelectorTest::StreamBuilder::GetFrameStateFunctionInfo(
 
 TARGET_TEST_F(InstructionSelectorTest, ReturnFloat32Constant) {
   const float kValue = 4.2f;
-  StreamBuilder m(this, kMachFloat32);
+  StreamBuilder m(this, MachineType::Float32());
   m.Return(m.Float32Constant(kValue));
   Stream s = m.Build(kAllInstructions);
   ASSERT_EQ(3U, s.size());
@@ -171,24 +167,24 @@ TARGET_TEST_F(InstructionSelectorTest, ReturnFloat32Constant) {
   ASSERT_EQ(InstructionOperand::CONSTANT, s[0]->OutputAt(0)->kind());
   EXPECT_FLOAT_EQ(kValue, s.ToFloat32(s[0]->OutputAt(0)));
   EXPECT_EQ(kArchRet, s[1]->arch_opcode());
-  EXPECT_EQ(1U, s[1]->InputCount());
+  EXPECT_EQ(2U, s[1]->InputCount());
 }
 
 
 TARGET_TEST_F(InstructionSelectorTest, ReturnParameter) {
-  StreamBuilder m(this, kMachInt32, kMachInt32);
+  StreamBuilder m(this, MachineType::Int32(), MachineType::Int32());
   m.Return(m.Parameter(0));
   Stream s = m.Build(kAllInstructions);
   ASSERT_EQ(3U, s.size());
   EXPECT_EQ(kArchNop, s[0]->arch_opcode());
   ASSERT_EQ(1U, s[0]->OutputCount());
   EXPECT_EQ(kArchRet, s[1]->arch_opcode());
-  EXPECT_EQ(1U, s[1]->InputCount());
+  EXPECT_EQ(2U, s[1]->InputCount());
 }
 
 
 TARGET_TEST_F(InstructionSelectorTest, ReturnZero) {
-  StreamBuilder m(this, kMachInt32);
+  StreamBuilder m(this, MachineType::Int32());
   m.Return(m.Int32Constant(0));
   Stream s = m.Build(kAllInstructions);
   ASSERT_EQ(3U, s.size());
@@ -197,18 +193,16 @@ TARGET_TEST_F(InstructionSelectorTest, ReturnZero) {
   EXPECT_EQ(InstructionOperand::CONSTANT, s[0]->OutputAt(0)->kind());
   EXPECT_EQ(0, s.ToInt32(s[0]->OutputAt(0)));
   EXPECT_EQ(kArchRet, s[1]->arch_opcode());
-  EXPECT_EQ(1U, s[1]->InputCount());
+  EXPECT_EQ(2U, s[1]->InputCount());
 }
 
 
 // -----------------------------------------------------------------------------
 // Conversions.
 
-
-TARGET_TEST_F(InstructionSelectorTest, TruncateFloat64ToInt32WithParameter) {
-  StreamBuilder m(this, kMachInt32, kMachFloat64);
-  m.Return(
-      m.TruncateFloat64ToInt32(TruncationMode::kJavaScript, m.Parameter(0)));
+TARGET_TEST_F(InstructionSelectorTest, TruncateFloat64ToWord32WithParameter) {
+  StreamBuilder m(this, MachineType::Int32(), MachineType::Float64());
+  m.Return(m.TruncateFloat64ToWord32(m.Parameter(0)));
   Stream s = m.Build(kAllInstructions);
   ASSERT_EQ(4U, s.size());
   EXPECT_EQ(kArchNop, s[0]->arch_opcode());
@@ -224,7 +218,7 @@ TARGET_TEST_F(InstructionSelectorTest, TruncateFloat64ToInt32WithParameter) {
 
 
 TARGET_TEST_F(InstructionSelectorTest, DoubleParameter) {
-  StreamBuilder m(this, kMachFloat64, kMachFloat64);
+  StreamBuilder m(this, MachineType::Float64(), MachineType::Float64());
   Node* param = m.Parameter(0);
   m.Return(param);
   Stream s = m.Build(kAllInstructions);
@@ -233,7 +227,7 @@ TARGET_TEST_F(InstructionSelectorTest, DoubleParameter) {
 
 
 TARGET_TEST_F(InstructionSelectorTest, ReferenceParameter) {
-  StreamBuilder m(this, kMachAnyTagged, kMachAnyTagged);
+  StreamBuilder m(this, MachineType::AnyTagged(), MachineType::AnyTagged());
   Node* param = m.Parameter(0);
   m.Return(param);
   Stream s = m.Build(kAllInstructions);
@@ -242,28 +236,23 @@ TARGET_TEST_F(InstructionSelectorTest, ReferenceParameter) {
 
 
 // -----------------------------------------------------------------------------
-// Finish.
+// FinishRegion.
 
 
-TARGET_TEST_F(InstructionSelectorTest, Finish) {
-  StreamBuilder m(this, kMachAnyTagged, kMachAnyTagged);
+TARGET_TEST_F(InstructionSelectorTest, FinishRegion) {
+  StreamBuilder m(this, MachineType::AnyTagged(), MachineType::AnyTagged());
   Node* param = m.Parameter(0);
-  Node* finish = m.AddNode(m.common()->Finish(1), param, m.graph()->start());
+  Node* finish =
+      m.AddNode(m.common()->FinishRegion(), param, m.graph()->start());
   m.Return(finish);
   Stream s = m.Build(kAllInstructions);
-  ASSERT_EQ(4U, s.size());
+  ASSERT_EQ(3U, s.size());
   EXPECT_EQ(kArchNop, s[0]->arch_opcode());
   ASSERT_EQ(1U, s[0]->OutputCount());
   ASSERT_TRUE(s[0]->Output()->IsUnallocated());
+  EXPECT_EQ(kArchRet, s[1]->arch_opcode());
   EXPECT_EQ(s.ToVreg(param), s.ToVreg(s[0]->Output()));
-  EXPECT_EQ(kArchNop, s[1]->arch_opcode());
-  ASSERT_EQ(1U, s[1]->InputCount());
-  ASSERT_TRUE(s[1]->InputAt(0)->IsUnallocated());
-  EXPECT_EQ(s.ToVreg(param), s.ToVreg(s[1]->InputAt(0)));
-  ASSERT_EQ(1U, s[1]->OutputCount());
-  ASSERT_TRUE(s[1]->Output()->IsUnallocated());
-  EXPECT_TRUE(UnallocatedOperand::cast(s[1]->Output())->HasSameAsInputPolicy());
-  EXPECT_EQ(s.ToVreg(finish), s.ToVreg(s[1]->Output()));
+  EXPECT_EQ(s.ToVreg(param), s.ToVreg(s[1]->InputAt(1)));
   EXPECT_TRUE(s.IsReference(finish));
 }
 
@@ -281,14 +270,14 @@ TARGET_TEST_P(InstructionSelectorPhiTest, Doubleness) {
   StreamBuilder m(this, type, type, type);
   Node* param0 = m.Parameter(0);
   Node* param1 = m.Parameter(1);
-  MLabel a, b, c;
+  RawMachineLabel a, b, c;
   m.Branch(m.Int32Constant(0), &a, &b);
   m.Bind(&a);
   m.Goto(&c);
   m.Bind(&b);
   m.Goto(&c);
   m.Bind(&c);
-  Node* phi = m.Phi(type, param0, param1);
+  Node* phi = m.Phi(type.representation(), param0, param1);
   m.Return(phi);
   Stream s = m.Build(kAllInstructions);
   EXPECT_EQ(s.IsDouble(phi), s.IsDouble(param0));
@@ -301,14 +290,14 @@ TARGET_TEST_P(InstructionSelectorPhiTest, Referenceness) {
   StreamBuilder m(this, type, type, type);
   Node* param0 = m.Parameter(0);
   Node* param1 = m.Parameter(1);
-  MLabel a, b, c;
+  RawMachineLabel a, b, c;
   m.Branch(m.Int32Constant(1), &a, &b);
   m.Bind(&a);
   m.Goto(&c);
   m.Bind(&b);
   m.Goto(&c);
   m.Bind(&c);
-  Node* phi = m.Phi(type, param0, param1);
+  Node* phi = m.Phi(type.representation(), param0, param1);
   m.Return(phi);
   Stream s = m.Build(kAllInstructions);
   EXPECT_EQ(s.IsReference(phi), s.IsReference(param0));
@@ -316,11 +305,14 @@ TARGET_TEST_P(InstructionSelectorPhiTest, Referenceness) {
 }
 
 
-INSTANTIATE_TEST_CASE_P(InstructionSelectorTest, InstructionSelectorPhiTest,
-                        ::testing::Values(kMachFloat64, kMachInt8, kMachUint8,
-                                          kMachInt16, kMachUint16, kMachInt32,
-                                          kMachUint32, kMachInt64, kMachUint64,
-                                          kMachPtr, kMachAnyTagged));
+INSTANTIATE_TEST_CASE_P(
+    InstructionSelectorTest, InstructionSelectorPhiTest,
+    ::testing::Values(MachineType::Float64(), MachineType::Int8(),
+                      MachineType::Uint8(), MachineType::Int16(),
+                      MachineType::Uint16(), MachineType::Int32(),
+                      MachineType::Uint32(), MachineType::Int64(),
+                      MachineType::Uint64(), MachineType::Pointer(),
+                      MachineType::AnyTagged()));
 
 
 // -----------------------------------------------------------------------------
@@ -328,14 +320,16 @@ INSTANTIATE_TEST_CASE_P(InstructionSelectorTest, InstructionSelectorPhiTest,
 
 
 TARGET_TEST_F(InstructionSelectorTest, ValueEffect) {
-  StreamBuilder m1(this, kMachInt32, kMachPtr);
+  StreamBuilder m1(this, MachineType::Int32(), MachineType::Pointer());
   Node* p1 = m1.Parameter(0);
-  m1.Return(m1.Load(kMachInt32, p1, m1.Int32Constant(0)));
+  m1.Return(m1.Load(MachineType::Int32(), p1, m1.Int32Constant(0)));
   Stream s1 = m1.Build(kAllInstructions);
-  StreamBuilder m2(this, kMachInt32, kMachPtr);
+  StreamBuilder m2(this, MachineType::Int32(), MachineType::Pointer());
   Node* p2 = m2.Parameter(0);
-  m2.Return(m2.AddNode(m2.machine()->Load(kMachInt32), p2, m2.Int32Constant(0),
-                       m2.AddNode(m2.common()->ValueEffect(1), p2)));
+  m2.Return(m2.AddNode(
+      m2.machine()->Load(MachineType::Int32()), p2, m2.Int32Constant(0),
+      m2.AddNode(m2.common()->BeginRegion(RegionObservability::kObservable),
+                 m2.graph()->start())));
   Stream s2 = m2.Build(kAllInstructions);
   EXPECT_LE(3U, s1.size());
   ASSERT_EQ(s1.size(), s2.size());
@@ -354,8 +348,8 @@ TARGET_TEST_F(InstructionSelectorTest, ValueEffect) {
 
 
 TARGET_TEST_F(InstructionSelectorTest, CallJSFunctionWithDeopt) {
-  StreamBuilder m(this, kMachAnyTagged, kMachAnyTagged, kMachAnyTagged,
-                  kMachAnyTagged);
+  StreamBuilder m(this, MachineType::AnyTagged(), MachineType::AnyTagged(),
+                  MachineType::AnyTagged(), MachineType::AnyTagged());
 
   BailoutId bailout_id(42);
 
@@ -363,24 +357,26 @@ TARGET_TEST_F(InstructionSelectorTest, CallJSFunctionWithDeopt) {
   Node* receiver = m.Parameter(1);
   Node* context = m.Parameter(2);
 
-  ZoneVector<MachineType> int32_type(1, kMachInt32, zone());
+  ZoneVector<MachineType> int32_type(1, MachineType::Int32(), zone());
   ZoneVector<MachineType> empty_types(zone());
 
   CallDescriptor* descriptor = Linkage::GetJSCallDescriptor(
       zone(), false, 1, CallDescriptor::kNeedsFrameState);
 
+  // Build frame state for the state before the call.
   Node* parameters =
       m.AddNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(1));
   Node* locals = m.AddNode(m.common()->TypedStateValues(&empty_types));
   Node* stack = m.AddNode(m.common()->TypedStateValues(&empty_types));
-  Node* context_dummy = m.Int32Constant(0);
-
+  Node* context_sentinel = m.Int32Constant(0);
   Node* state_node = m.AddNode(
       m.common()->FrameState(bailout_id, OutputFrameStateCombine::Push(),
                              m.GetFrameStateFunctionInfo(1, 0)),
-      parameters, locals, stack, context_dummy, function_node,
+      parameters, locals, stack, context_sentinel, function_node,
       m.UndefinedConstant());
-  Node* args[] = {receiver, context};
+
+  // Build the call.
+  Node* args[] = {receiver, m.UndefinedConstant(), m.Int32Constant(1), context};
   Node* call =
       m.CallNWithFrameState(descriptor, function_node, args, state_node);
   m.Return(call);
@@ -402,9 +398,9 @@ TARGET_TEST_F(InstructionSelectorTest, CallJSFunctionWithDeopt) {
 }
 
 
-TARGET_TEST_F(InstructionSelectorTest, CallFunctionStubWithDeopt) {
-  StreamBuilder m(this, kMachAnyTagged, kMachAnyTagged, kMachAnyTagged,
-                  kMachAnyTagged);
+TARGET_TEST_F(InstructionSelectorTest, CallStubWithDeopt) {
+  StreamBuilder m(this, MachineType::AnyTagged(), MachineType::AnyTagged(),
+                  MachineType::AnyTagged(), MachineType::AnyTagged());
 
   BailoutId bailout_id_before(42);
 
@@ -413,9 +409,14 @@ TARGET_TEST_F(InstructionSelectorTest, CallFunctionStubWithDeopt) {
   Node* receiver = m.Parameter(1);
   Node* context = m.Int32Constant(1);  // Context is ignored.
 
-  ZoneVector<MachineType> int32_type(1, kMachInt32, zone());
-  ZoneVector<MachineType> float64_type(1, kMachFloat64, zone());
-  ZoneVector<MachineType> tagged_type(1, kMachAnyTagged, zone());
+  ZoneVector<MachineType> int32_type(1, MachineType::Int32(), zone());
+  ZoneVector<MachineType> float64_type(1, MachineType::Float64(), zone());
+  ZoneVector<MachineType> tagged_type(1, MachineType::AnyTagged(), zone());
+
+  Callable callable = CodeFactory::ToObject(isolate());
+  CallDescriptor* descriptor = Linkage::GetStubCallDescriptor(
+      isolate(), zone(), callable.descriptor(), 1,
+      CallDescriptor::kNeedsFrameState, Operator::kNoProperties);
 
   // Build frame state for the state before the call.
   Node* parameters =
@@ -424,18 +425,17 @@ TARGET_TEST_F(InstructionSelectorTest, CallFunctionStubWithDeopt) {
                            m.Float64Constant(0.5));
   Node* stack = m.AddNode(m.common()->TypedStateValues(&tagged_type),
                           m.UndefinedConstant());
-
   Node* context_sentinel = m.Int32Constant(0);
-  Node* frame_state_before = m.AddNode(
+  Node* state_node = m.AddNode(
       m.common()->FrameState(bailout_id_before, OutputFrameStateCombine::Push(),
                              m.GetFrameStateFunctionInfo(1, 1)),
       parameters, locals, stack, context_sentinel, function_node,
       m.UndefinedConstant());
 
   // Build the call.
-  Node* call = m.CallFunctionStub0(function_node, receiver, context,
-                                   frame_state_before, CALL_AS_METHOD);
-
+  Node* args[] = {function_node, receiver, context};
+  Node* stub_code = m.HeapConstant(callable.code());
+  Node* call = m.CallNWithFrameState(descriptor, stub_code, args, state_node);
   m.Return(call);
 
   Stream s = m.Build(kAllExceptNopInstructions);
@@ -476,14 +476,16 @@ TARGET_TEST_F(InstructionSelectorTest, CallFunctionStubWithDeopt) {
   EXPECT_EQ(0, s.ToInt32(call_instr->InputAt(4)));  // This should be a context.
                                                     // We inserted 0 here.
   EXPECT_EQ(0.5, s.ToFloat64(call_instr->InputAt(5)));
-  EXPECT_TRUE(s.ToHeapObject(call_instr->InputAt(6))->IsUndefined());
-  EXPECT_EQ(kMachAnyTagged, desc_before->GetType(0));  // function is always
-                                                       // tagged/any.
-  EXPECT_EQ(kMachInt32, desc_before->GetType(1));
-  EXPECT_EQ(kMachAnyTagged, desc_before->GetType(2));  // context is always
-                                                       // tagged/any.
-  EXPECT_EQ(kMachFloat64, desc_before->GetType(3));
-  EXPECT_EQ(kMachAnyTagged, desc_before->GetType(4));
+  EXPECT_TRUE(s.ToHeapObject(call_instr->InputAt(6))->IsUndefined(isolate()));
+  EXPECT_EQ(MachineType::AnyTagged(),
+            desc_before->GetType(0));  // function is always
+                                       // tagged/any.
+  EXPECT_EQ(MachineType::Int32(), desc_before->GetType(1));
+  EXPECT_EQ(MachineType::AnyTagged(),
+            desc_before->GetType(2));  // context is always
+                                       // tagged/any.
+  EXPECT_EQ(MachineType::Float64(), desc_before->GetType(3));
+  EXPECT_EQ(MachineType::AnyTagged(), desc_before->GetType(4));
 
   // Function.
   EXPECT_EQ(s.ToVreg(function_node), s.ToVreg(call_instr->InputAt(7)));
@@ -496,10 +498,9 @@ TARGET_TEST_F(InstructionSelectorTest, CallFunctionStubWithDeopt) {
 }
 
 
-TARGET_TEST_F(InstructionSelectorTest,
-              CallFunctionStubDeoptRecursiveFrameState) {
-  StreamBuilder m(this, kMachAnyTagged, kMachAnyTagged, kMachAnyTagged,
-                  kMachAnyTagged);
+TARGET_TEST_F(InstructionSelectorTest, CallStubWithDeoptRecursiveFrameState) {
+  StreamBuilder m(this, MachineType::AnyTagged(), MachineType::AnyTagged(),
+                  MachineType::AnyTagged(), MachineType::AnyTagged());
 
   BailoutId bailout_id_before(42);
   BailoutId bailout_id_parent(62);
@@ -508,10 +509,16 @@ TARGET_TEST_F(InstructionSelectorTest,
   Node* function_node = m.Parameter(0);
   Node* receiver = m.Parameter(1);
   Node* context = m.Int32Constant(66);
+  Node* context2 = m.Int32Constant(46);
 
-  ZoneVector<MachineType> int32_type(1, kMachInt32, zone());
-  ZoneVector<MachineType> int32x2_type(2, kMachInt32, zone());
-  ZoneVector<MachineType> float64_type(1, kMachFloat64, zone());
+  ZoneVector<MachineType> int32_type(1, MachineType::Int32(), zone());
+  ZoneVector<MachineType> int32x2_type(2, MachineType::Int32(), zone());
+  ZoneVector<MachineType> float64_type(1, MachineType::Float64(), zone());
+
+  Callable callable = CodeFactory::ToObject(isolate());
+  CallDescriptor* descriptor = Linkage::GetStubCallDescriptor(
+      isolate(), zone(), callable.descriptor(), 1,
+      CallDescriptor::kNeedsFrameState, Operator::kNoProperties);
 
   // Build frame state for the state before the call.
   Node* parameters =
@@ -526,23 +533,22 @@ TARGET_TEST_F(InstructionSelectorTest,
                              m.GetFrameStateFunctionInfo(1, 1)),
       parameters, locals, stack, context, function_node, m.UndefinedConstant());
 
-  Node* context2 = m.Int32Constant(46);
   Node* parameters2 =
       m.AddNode(m.common()->TypedStateValues(&int32_type), m.Int32Constant(43));
   Node* locals2 = m.AddNode(m.common()->TypedStateValues(&float64_type),
                             m.Float64Constant(0.25));
   Node* stack2 = m.AddNode(m.common()->TypedStateValues(&int32x2_type),
                            m.Int32Constant(44), m.Int32Constant(45));
-  Node* frame_state_before = m.AddNode(
+  Node* state_node = m.AddNode(
       m.common()->FrameState(bailout_id_before, OutputFrameStateCombine::Push(),
                              m.GetFrameStateFunctionInfo(1, 1)),
       parameters2, locals2, stack2, context2, function_node,
       frame_state_parent);
 
   // Build the call.
-  Node* call = m.CallFunctionStub0(function_node, receiver, context2,
-                                   frame_state_before, CALL_AS_METHOD);
-
+  Node* args[] = {function_node, receiver, context2};
+  Node* stub_code = m.HeapConstant(callable.code());
+  Node* call = m.CallNWithFrameState(descriptor, stub_code, args, state_node);
   m.Return(call);
 
   Stream s = m.Build(kAllExceptNopInstructions);
@@ -579,31 +585,31 @@ TARGET_TEST_F(InstructionSelectorTest,
   EXPECT_EQ(1u, desc_before_outer->locals_count());
   EXPECT_EQ(1u, desc_before_outer->stack_count());
   // Values from parent environment.
-  EXPECT_EQ(kMachAnyTagged, desc_before->GetType(0));
+  EXPECT_EQ(MachineType::AnyTagged(), desc_before->GetType(0));
   EXPECT_EQ(63, s.ToInt32(call_instr->InputAt(3)));
-  EXPECT_EQ(kMachInt32, desc_before_outer->GetType(1));
+  EXPECT_EQ(MachineType::Int32(), desc_before_outer->GetType(1));
   // Context:
   EXPECT_EQ(66, s.ToInt32(call_instr->InputAt(4)));
-  EXPECT_EQ(kMachAnyTagged, desc_before_outer->GetType(2));
+  EXPECT_EQ(MachineType::AnyTagged(), desc_before_outer->GetType(2));
   EXPECT_EQ(64, s.ToInt32(call_instr->InputAt(5)));
-  EXPECT_EQ(kMachInt32, desc_before_outer->GetType(3));
+  EXPECT_EQ(MachineType::Int32(), desc_before_outer->GetType(3));
   EXPECT_EQ(65, s.ToInt32(call_instr->InputAt(6)));
-  EXPECT_EQ(kMachInt32, desc_before_outer->GetType(4));
+  EXPECT_EQ(MachineType::Int32(), desc_before_outer->GetType(4));
   // Values from the nested frame.
   EXPECT_EQ(1u, desc_before->parameters_count());
   EXPECT_EQ(1u, desc_before->locals_count());
   EXPECT_EQ(2u, desc_before->stack_count());
-  EXPECT_EQ(kMachAnyTagged, desc_before->GetType(0));
+  EXPECT_EQ(MachineType::AnyTagged(), desc_before->GetType(0));
   EXPECT_EQ(43, s.ToInt32(call_instr->InputAt(8)));
-  EXPECT_EQ(kMachInt32, desc_before->GetType(1));
+  EXPECT_EQ(MachineType::Int32(), desc_before->GetType(1));
   EXPECT_EQ(46, s.ToInt32(call_instr->InputAt(9)));
-  EXPECT_EQ(kMachAnyTagged, desc_before->GetType(2));
+  EXPECT_EQ(MachineType::AnyTagged(), desc_before->GetType(2));
   EXPECT_EQ(0.25, s.ToFloat64(call_instr->InputAt(10)));
-  EXPECT_EQ(kMachFloat64, desc_before->GetType(3));
+  EXPECT_EQ(MachineType::Float64(), desc_before->GetType(3));
   EXPECT_EQ(44, s.ToInt32(call_instr->InputAt(11)));
-  EXPECT_EQ(kMachInt32, desc_before->GetType(4));
+  EXPECT_EQ(MachineType::Int32(), desc_before->GetType(4));
   EXPECT_EQ(45, s.ToInt32(call_instr->InputAt(12)));
-  EXPECT_EQ(kMachInt32, desc_before->GetType(5));
+  EXPECT_EQ(MachineType::Int32(), desc_before->GetType(5));
 
   // Function.
   EXPECT_EQ(s.ToVreg(function_node), s.ToVreg(call_instr->InputAt(13)));

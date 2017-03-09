@@ -23,6 +23,9 @@ enum class GraphReducer::State : uint8_t {
 };
 
 
+void Reducer::Finalize() {}
+
+
 GraphReducer::GraphReducer(Zone* zone, Graph* graph, Node* dead)
     : graph_(graph),
       dead_(dead),
@@ -58,7 +61,11 @@ void GraphReducer::ReduceNode(Node* node) {
         Push(node);
       }
     } else {
-      break;
+      // Run all finalizers.
+      for (Reducer* const reducer : reducers_) reducer->Finalize();
+
+      // Check if we have new nodes to revisit.
+      if (revisit_.empty()) break;
     }
   }
   DCHECK(revisit_.empty());
@@ -161,6 +168,10 @@ void GraphReducer::Replace(Node* node, Node* replacement) {
 
 
 void GraphReducer::Replace(Node* node, Node* replacement, NodeId max_id) {
+  if (FLAG_trace_turbo_reduction) {
+    OFStream os(stdout);
+    os << "- Replacing " << *node << " with " << *replacement << std::endl;
+  }
   if (node == graph()->start()) graph()->SetStart(replacement);
   if (node == graph()->end()) graph()->SetEnd(replacement);
   if (replacement->id() <= max_id) {
@@ -215,7 +226,11 @@ void GraphReducer::ReplaceWithValue(Node* node, Node* value, Node* effect,
         edge.UpdateTo(dead_);
         Revisit(user);
       } else {
-        UNREACHABLE();
+        DCHECK_NOT_NULL(control);
+        edge.UpdateTo(control);
+        Revisit(user);
+        // TODO(jarin) Check that the node cannot throw (otherwise, it
+        // would have to be connected via IfSuccess/IfException).
       }
     } else if (NodeProperties::IsEffectEdge(edge)) {
       DCHECK_NOT_NULL(effect);

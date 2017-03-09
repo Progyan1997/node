@@ -23,13 +23,12 @@ namespace compiler {
 
 using ::testing::Matcher;
 
-
-class GraphTest : public TestWithContext, public TestWithIsolateAndZone {
+class GraphTest : public virtual TestWithNativeContext,
+                  public virtual TestWithIsolateAndZone {
  public:
   explicit GraphTest(int num_parameters = 1);
   ~GraphTest() override;
 
- protected:
   Node* start() { return graph()->start(); }
   Node* end() { return graph()->end(); }
 
@@ -49,6 +48,9 @@ class GraphTest : public TestWithContext, public TestWithIsolateAndZone {
 
   Node* EmptyFrameState();
 
+  Matcher<Node*> IsBooleanConstant(bool value) {
+    return value ? IsTrueConstant() : IsFalseConstant();
+  }
   Matcher<Node*> IsFalseConstant();
   Matcher<Node*> IsTrueConstant();
   Matcher<Node*> IsUndefinedConstant();

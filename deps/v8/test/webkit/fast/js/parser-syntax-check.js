@@ -229,7 +229,7 @@ valid  ("do if (a) with (b) continue; else debugger; while (false)");
 invalid("do if (a) while (false) else debugger");
 invalid("while if (a) ;");
 valid  ("if (a) function f() {} else function g() {}");
-valid  ("if (a()) while(0) function f() {} else function g() {}");
+invalid("if (a()) while(0) function f() {} else function g() {}");
 invalid("if (a()) function f() { else function g() }");
 invalid("if (a) if (b) ; else function f {}");
 invalid("if (a) if (b) ; else function (){}");

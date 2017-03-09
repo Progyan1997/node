@@ -1,6 +1,6 @@
 'use strict';
 require('../common');
-var assert = require('assert');
+const assert = require('assert');
 
 // Requiring the domain module here changes the function that is used by node to
 // call process.nextTick's callbacks to a variant that specifically handles
@@ -9,28 +9,21 @@ var assert = require('assert');
 // removed.
 require('domain');
 
-var implementations = [
+const implementations = [
   function(fn) {
     Promise.resolve().then(fn);
-  },
-  function(fn) {
-    var obj = {};
-
-    Object.observe(obj, fn);
-
-    obj.a = 1;
   }
 ];
 
-var expected = 0;
-var done = 0;
+let expected = 0;
+let done = 0;
 
 process.on('exit', function() {
-  assert.equal(done, expected);
+  assert.strictEqual(done, expected);
 });
 
 function test(scheduleMicrotask) {
-  var nextTickCalled = false;
+  let nextTickCalled = false;
   expected++;
 
   scheduleMicrotask(function() {

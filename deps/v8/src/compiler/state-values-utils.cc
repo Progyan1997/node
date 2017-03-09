@@ -271,11 +271,10 @@ Node* StateValuesAccess::iterator::node() {
 MachineType StateValuesAccess::iterator::type() {
   Node* state = Top()->node;
   if (state->opcode() == IrOpcode::kStateValues) {
-    return kMachAnyTagged;
+    return MachineType::AnyTagged();
   } else {
     DCHECK_EQ(IrOpcode::kTypedStateValues, state->opcode());
-    const ZoneVector<MachineType>* types =
-        OpParameter<const ZoneVector<MachineType>*>(state);
+    ZoneVector<MachineType> const* types = MachineTypesOf(state->op());
     return (*types)[Top()->index];
   }
 }

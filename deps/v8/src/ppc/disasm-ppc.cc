@@ -39,6 +39,7 @@
 namespace v8 {
 namespace internal {
 
+const auto GetRegConfig = RegisterConfiguration::Crankshaft;
 
 //------------------------------------------------------------------------------
 
@@ -78,6 +79,7 @@ class Decoder {
 
   void DecodeExt1(Instruction* instr);
   void DecodeExt2(Instruction* instr);
+  void DecodeExt3(Instruction* instr);
   void DecodeExt4(Instruction* instr);
   void DecodeExt5(Instruction* instr);
 
@@ -116,7 +118,9 @@ void Decoder::PrintRegister(int reg) {
 
 
 // Print the double FP register name according to the active name converter.
-void Decoder::PrintDRegister(int reg) { Print(FPRegisters::Name(reg)); }
+void Decoder::PrintDRegister(int reg) {
+  Print(GetRegConfig()->GetDoubleRegisterName(reg));
+}
 
 
 // Print SoftwareInterrupt codes. Factoring this out reduces the complexity of
@@ -607,6 +611,16 @@ void Decoder::DecodeExt2(Instruction* instr) {
       Format(instr, "stfdux   'rs, 'ra, 'rb");
       return;
     }
+    case POPCNTW: {
+      Format(instr, "popcntw  'ra, 'rs");
+      return;
+    }
+#if V8_TARGET_ARCH_PPC64
+    case POPCNTD: {
+      Format(instr, "popcntd  'ra, 'rs");
+      return;
+    }
+#endif
   }
 
   switch (instr->Bits(10, 2) << 2) {
@@ -644,8 +658,16 @@ void Decoder::DecodeExt2(Instruction* instr) {
       Format(instr, "subfc'. 'rt, 'ra, 'rb");
       return;
     }
+    case SUBFEX: {
+      Format(instr, "subfe'. 'rt, 'ra, 'rb");
+      return;
+    }
     case ADDCX: {
       Format(instr, "addc'.   'rt, 'ra, 'rb");
+      return;
+    }
+    case ADDEX: {
+      Format(instr, "adde'.   'rt, 'ra, 'rb");
       return;
     }
     case CNTLZWX: {
@@ -870,6 +892,23 @@ void Decoder::DecodeExt2(Instruction* instr) {
 }
 
 
+void Decoder::DecodeExt3(Instruction* instr) {
+  switch (instr->Bits(10, 1) << 1) {
+    case FCFID: {
+      Format(instr, "fcfids'. 'Dt, 'Db");
+      break;
+    }
+    case FCFIDU: {
+      Format(instr, "fcfidus'.'Dt, 'Db");
+      break;
+    }
+    default: {
+      Unknown(instr);  // not used by V8
+    }
+  }
+}
+
+
 void Decoder::DecodeExt4(Instruction* instr) {
   switch (instr->Bits(5, 1) << 1) {
     case FDIV: {
@@ -919,12 +958,24 @@ void Decoder::DecodeExt4(Instruction* instr) {
       Format(instr, "fcfid'.  'Dt, 'Db");
       break;
     }
+    case FCFIDU: {
+      Format(instr, "fcfidu'. 'Dt, 'Db");
+      break;
+    }
     case FCTID: {
       Format(instr, "fctid   'Dt, 'Db");
       break;
     }
     case FCTIDZ: {
       Format(instr, "fctidz  'Dt, 'Db");
+      break;
+    }
+    case FCTIDU: {
+      Format(instr, "fctidu  'Dt, 'Db");
+      break;
+    }
+    case FCTIDUZ: {
+      Format(instr, "fctiduz 'Dt, 'Db");
       break;
     }
     case FCTIW: {
@@ -975,6 +1026,18 @@ void Decoder::DecodeExt4(Instruction* instr) {
       Format(instr, "fneg'.   'Dt, 'Db");
       break;
     }
+    case MCRFS: {
+      Format(instr, "mcrfs   ?,?");
+      break;
+    }
+    case MTFSB0: {
+      Format(instr, "mtfsb0'. ?");
+      break;
+    }
+    case MTFSB1: {
+      Format(instr, "mtfsb1'. ?");
+      break;
+    }
     default: {
       Unknown(instr);  // not used by V8
     }
@@ -1019,14 +1082,12 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
   out_buffer_pos_ += SNPrintF(out_buffer_ + out_buffer_pos_, "%08x       ",
                               instr->InstructionBits());
 
-#if ABI_USES_FUNCTION_DESCRIPTORS
-  // The first field will be identified as a jump table entry.  We emit the rest
-  // of the structure as zero, so just skip past them.
-  if (instr->InstructionBits() == 0) {
+  if (ABI_USES_FUNCTION_DESCRIPTORS && instr->InstructionBits() == 0) {
+    // The first field will be identified as a jump table entry.  We
+    // emit the rest of the structure as zero, so just skip past them.
     Format(instr, "constant");
     return Instruction::kInstrSize;
   }
-#endif
 
   switch (instr->OpcodeValue() << 26) {
     case TWI: {
@@ -1287,7 +1348,10 @@ int Decoder::InstructionDecode(byte* instr_ptr) {
       Format(instr, "stfdu   'Dt, 'int16('ra)");
       break;
     }
-    case EXT3:
+    case EXT3: {
+      DecodeExt3(instr);
+      break;
+    }
     case EXT4: {
       DecodeExt4(instr);
       break;
@@ -1338,7 +1402,7 @@ namespace disasm {
 
 
 const char* NameConverter::NameOfAddress(byte* addr) const {
-  v8::internal::SNPrintF(tmp_buffer_, "%p", addr);
+  v8::internal::SNPrintF(tmp_buffer_, "%p", static_cast<void*>(addr));
   return tmp_buffer_.start();
 }
 
@@ -1349,7 +1413,7 @@ const char* NameConverter::NameOfConstant(byte* addr) const {
 
 
 const char* NameConverter::NameOfCPURegister(int reg) const {
-  return v8::internal::Registers::Name(reg);
+  return v8::internal::GetRegConfig()->GetGeneralRegisterName(reg);
 }
 
 const char* NameConverter::NameOfByteCPURegister(int reg) const {
@@ -1398,7 +1462,7 @@ void Disassembler::Disassemble(FILE* f, byte* begin, byte* end) {
     buffer[0] = '\0';
     byte* prev_pc = pc;
     pc += d.InstructionDecode(buffer, pc);
-    v8::internal::PrintF(f, "%p    %08x      %s\n", prev_pc,
+    v8::internal::PrintF(f, "%p    %08x      %s\n", static_cast<void*>(prev_pc),
                          *reinterpret_cast<int32_t*>(prev_pc), buffer.start());
   }
 }

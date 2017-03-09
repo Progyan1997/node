@@ -63,27 +63,16 @@ void ReportException(v8::Isolate* isolate, v8::TryCatch* handler);
 static bool run_shell;
 
 
-class ShellArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
- public:
-  virtual void* Allocate(size_t length) {
-    void* data = AllocateUninitialized(length);
-    return data == NULL ? data : memset(data, 0, length);
-  }
-  virtual void* AllocateUninitialized(size_t length) { return malloc(length); }
-  virtual void Free(void* data, size_t) { free(data); }
-};
-
-
 int main(int argc, char* argv[]) {
-  v8::V8::InitializeICU();
+  v8::V8::InitializeICUDefaultLocation(argv[0]);
   v8::V8::InitializeExternalStartupData(argv[0]);
   v8::Platform* platform = v8::platform::CreateDefaultPlatform();
   v8::V8::InitializePlatform(platform);
   v8::V8::Initialize();
   v8::V8::SetFlagsFromCommandLine(&argc, argv, true);
-  ShellArrayBufferAllocator array_buffer_allocator;
   v8::Isolate::CreateParams create_params;
-  create_params.array_buffer_allocator = &array_buffer_allocator;
+  create_params.array_buffer_allocator =
+      v8::ArrayBuffer::Allocator::NewDefaultAllocator();
   v8::Isolate* isolate = v8::Isolate::New(create_params);
   run_shell = (argc == 1);
   int result;
@@ -103,6 +92,7 @@ int main(int argc, char* argv[]) {
   v8::V8::Dispose();
   v8::V8::ShutdownPlatform();
   delete platform;
+  delete create_params.array_buffer_allocator;
   return result;
 }
 
@@ -412,9 +402,11 @@ void ReportException(v8::Isolate* isolate, v8::TryCatch* try_catch) {
       fprintf(stderr, "^");
     }
     fprintf(stderr, "\n");
-    v8::String::Utf8Value stack_trace(
-        try_catch->StackTrace(context).ToLocalChecked());
-    if (stack_trace.length() > 0) {
+    v8::Local<v8::Value> stack_trace_string;
+    if (try_catch->StackTrace(context).ToLocal(&stack_trace_string) &&
+        stack_trace_string->IsString() &&
+        v8::Local<v8::String>::Cast(stack_trace_string)->Length() > 0) {
+      v8::String::Utf8Value stack_trace(stack_trace_string);
       const char* stack_trace_string = ToCString(stack_trace);
       fprintf(stderr, "%s\n", stack_trace_string);
     }

@@ -7,13 +7,14 @@ prefix parallel
 [true] # This section applies to all platforms
 
 [$system==win32]
-test-debug-no-context                : PASS,FLAKY
-test-tls-ticket-cluster              : PASS,FLAKY
 
 [$system==linux]
 
 [$system==macos]
 
+[$arch==arm || $arch==arm64]
+
 [$system==solaris] # Also applies to SmartOS
 
 [$system==freebsd]
+

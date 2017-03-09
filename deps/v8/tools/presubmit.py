@@ -35,6 +35,7 @@ except ImportError, e:
   md5er = md5.new
 
 
+import json
 import optparse
 import os
 from os.path import abspath, join, dirname, basename, exists
@@ -45,22 +46,24 @@ import subprocess
 import multiprocessing
 from subprocess import PIPE
 
+from testrunner.local import statusfile
+from testrunner.local import testsuite
+from testrunner.local import utils
+
 # Special LINT rules diverging from default and reason.
 # build/header_guard: Our guards have the form "V8_FOO_H_", not "SRC_FOO_H_".
 # build/include_what_you_use: Started giving false positives for variables
 #   named "string" and "map" assuming that you needed to include STL headers.
 # TODO(bmeurer): Fix and re-enable readability/check
-# TODO(mstarzinger): Fix and re-enable readability/namespace
+# TODO(epertoso): Maybe re-enable readability/fn_size after
+# http://crrev.com/2199323003 relands.
 
 LINT_RULES = """
 -build/header_guard
-+build/include_alpha
 -build/include_what_you_use
 -build/namespaces
 -readability/check
--readability/inheritance
--readability/namespace
--readability/nolint
+-readability/fn_size
 +readability/streams
 -runtime/references
 """.split()
@@ -200,7 +203,7 @@ class CppLintProcessor(SourceFileProcessor):
 
   def GetPathsToSearch(self):
     return ['src', 'include', 'samples', join('test', 'cctest'),
-            join('test', 'unittests')]
+            join('test', 'unittests'), join('test', 'inspector')]
 
   def GetCpplintScript(self, prio_path):
     for path in [prio_path] + os.environ["PATH"].split(os.pathsep):
@@ -292,13 +295,21 @@ class SourceProcessor(SourceFileProcessor):
 
   IGNORE_COPYRIGHTS = ['box2d.js',
                        'cpplint.py',
+                       'check_injected_script_source.py',
                        'copy.js',
                        'corrections.js',
                        'crypto.js',
                        'daemon.py',
+                       'debugger-script.js',
                        'earley-boyer.js',
                        'fannkuch.js',
                        'fasta.js',
+                       'generate_protocol_externs.py',
+                       'injected-script.cc',
+                       'injected-script.h',
+                       'injected-script-source.js',
+                       'java-script-call-frame.cc',
+                       'java-script-call-frame.h',
                        'jsmin.py',
                        'libraries.cc',
                        'libraries-empty.cc',
@@ -308,10 +319,19 @@ class SourceProcessor(SourceFileProcessor):
                        'primes.js',
                        'raytrace.js',
                        'regexp-pcre.js',
+                       'rjsmin.py',
+                       'script-breakpoint.h',
                        'sqlite.js',
                        'sqlite-change-heap.js',
                        'sqlite-pointer-masking.js',
                        'sqlite-safe-heap.js',
+                       'v8-debugger-script.h',
+                       'v8-function-call.cc',
+                       'v8-function-call.h',
+                       'v8-inspector-impl.cc',
+                       'v8-inspector-impl.h',
+                       'v8-runtime-agent-impl.cc',
+                       'v8-runtime-agent-impl.h',
                        'gnuplot-4.6.3-emscripten.js',
                        'zlib.js']
   IGNORE_TABS = IGNORE_COPYRIGHTS + ['unicode-test.js', 'html-comments.js']
@@ -353,30 +373,6 @@ class SourceProcessor(SourceFileProcessor):
     if not contents.endswith('\n') or contents.endswith('\n\n'):
       print "%s does not end with a single new line." % name
       result = False
-    # Check two empty lines between declarations.
-    if name.endswith(".cc"):
-      line = 0
-      lines = []
-      parts = contents.split('\n')
-      while line < len(parts) - 2:
-        if self.EndOfDeclaration(parts[line]):
-          if self.StartOfDeclaration(parts[line + 1]):
-            lines.append(str(line + 1))
-            line += 1
-          elif parts[line + 1] == "" and \
-               self.StartOfDeclaration(parts[line + 2]):
-            lines.append(str(line + 1))
-            line += 2
-        line += 1
-      if len(lines) >= 1:
-        linenumbers = ', '.join(lines)
-        if len(lines) > 1:
-          print "%s does not have two empty lines between declarations " \
-                "in lines %s." % (name, linenumbers)
-        else:
-          print "%s does not have two empty lines between declarations " \
-                "in line %s." % (name, linenumbers)
-        result = False
     # Sanitize flags for fuzzer.
     if "mjsunit" in name:
       match = FLAGS_LINE.search(contents)
@@ -400,11 +396,59 @@ class SourceProcessor(SourceFileProcessor):
     print "Total violating files: %s" % violations
     return success
 
+def _CheckStatusFileForDuplicateKeys(filepath):
+  comma_space_bracket = re.compile(", *]")
+  lines = []
+  with open(filepath) as f:
+    for line in f.readlines():
+      # Skip all-comment lines.
+      if line.lstrip().startswith("#"): continue
+      # Strip away comments at the end of the line.
+      comment_start = line.find("#")
+      if comment_start != -1:
+        line = line[:comment_start]
+      line = line.strip()
+      # Strip away trailing commas within the line.
+      line = comma_space_bracket.sub("]", line)
+      if len(line) > 0:
+        lines.append(line)
 
-def CheckExternalReferenceRegistration(workspace):
-  code = subprocess.call(
-      [sys.executable, join(workspace, "tools", "external-reference-check.py")])
-  return code == 0
+  # Strip away trailing commas at line ends. Ugh.
+  for i in range(len(lines) - 1):
+    if (lines[i].endswith(",") and len(lines[i + 1]) > 0 and
+        lines[i + 1][0] in ("}", "]")):
+      lines[i] = lines[i][:-1]
+
+  contents = "\n".join(lines)
+  # JSON wants double-quotes.
+  contents = contents.replace("'", '"')
+  # Fill in keywords (like PASS, SKIP).
+  for key in statusfile.KEYWORDS:
+    contents = re.sub(r"\b%s\b" % key, "\"%s\"" % key, contents)
+
+  status = {"success": True}
+  def check_pairs(pairs):
+    keys = {}
+    for key, value in pairs:
+      if key in keys:
+        print("%s: Error: duplicate key %s" % (filepath, key))
+        status["success"] = False
+      keys[key] = True
+
+  json.loads(contents, object_pairs_hook=check_pairs)
+  return status["success"]
+
+def CheckStatusFiles(workspace):
+  success = True
+  suite_paths = utils.GetSuitePaths(join(workspace, "test"))
+  for root in suite_paths:
+    suite_path = join(workspace, "test", root)
+    status_file_path = join(suite_path, root + ".status")
+    suite = testsuite.TestSuite.LoadTestSuite(suite_path)
+    if suite and exists(status_file_path):
+      success &= statusfile.PresubmitCheck(status_file_path)
+      success &= _CheckStatusFileForDuplicateKeys(status_file_path)
+  return success
 
 def CheckAuthorizedAuthor(input_api, output_api):
   """For non-googler/chromites committers, verify the author's email address is
@@ -448,11 +492,11 @@ def Main():
   success = True
   print "Running C++ lint check..."
   if not options.no_lint:
-    success = CppLintProcessor().Run(workspace) and success
+    success &= CppLintProcessor().Run(workspace)
   print "Running copyright header, trailing whitespaces and " \
         "two empty lines between declarations check..."
-  success = SourceProcessor().Run(workspace) and success
-  success = CheckExternalReferenceRegistration(workspace) and success
+  success &= SourceProcessor().Run(workspace)
+  success &= CheckStatusFiles(workspace)
   if success:
     return 0
   else:

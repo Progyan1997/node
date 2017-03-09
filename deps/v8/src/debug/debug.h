@@ -9,14 +9,16 @@
 #include "src/arguments.h"
 #include "src/assembler.h"
 #include "src/base/atomicops.h"
+#include "src/base/hashmap.h"
 #include "src/base/platform/platform.h"
-#include "src/debug/liveedit.h"
+#include "src/debug/debug-interface.h"
 #include "src/execution.h"
 #include "src/factory.h"
 #include "src/flags.h"
 #include "src/frames.h"
-#include "src/hashmap.h"
+#include "src/globals.h"
 #include "src/runtime/runtime.h"
+#include "src/source-position-table.h"
 #include "src/string-stream.h"
 #include "src/v8threads.h"
 
@@ -31,18 +33,16 @@ class DebugScope;
 
 
 // Step actions. NOTE: These values are in macros.py as well.
-enum StepAction {
+enum StepAction : int8_t {
   StepNone = -1,  // Stepping not prepared.
   StepOut = 0,    // Step out of the current function.
   StepNext = 1,   // Step to the next statement in the current function.
   StepIn = 2,     // Step into new functions invoked or the next statement
                   // in the current function.
-  StepMin = 3,    // Perform a minimum step in the current function.
-  StepInMin = 4,  // Step into new functions invoked or perform a minimum step
-                  // in the current function.
-  StepFrame = 5   // Step into a new frame or return to previous frame.
-};
+  StepFrame = 3,  // Step into a new frame or return to previous frame.
 
+  LastStepAction = StepFrame
+};
 
 // Type of exception break. NOTE: These values are in macros.py as well.
 enum ExceptionBreakType {
@@ -62,129 +62,164 @@ enum BreakPositionAlignment {
   BREAK_POSITION_ALIGNED = 1
 };
 
+enum DebugBreakType {
+  NOT_DEBUG_BREAK,
+  DEBUGGER_STATEMENT,
+  DEBUG_BREAK_SLOT,
+  DEBUG_BREAK_SLOT_AT_CALL,
+  DEBUG_BREAK_SLOT_AT_RETURN,
+  DEBUG_BREAK_SLOT_AT_TAIL_CALL,
+};
 
 class BreakLocation {
  public:
-  // Find the break point at the supplied address, or the closest one before
-  // the address.
-  static BreakLocation FromAddress(Handle<DebugInfo> debug_info,
-                                   BreakLocatorType type, Address pc);
+  static BreakLocation FromFrame(Handle<DebugInfo> debug_info,
+                                 JavaScriptFrame* frame);
 
-  static void FromAddressSameStatement(Handle<DebugInfo> debug_info,
-                                       BreakLocatorType type, Address pc,
-                                       List<BreakLocation>* result_out);
+  static void AllAtCurrentStatement(Handle<DebugInfo> debug_info,
+                                    JavaScriptFrame* frame,
+                                    List<BreakLocation>* result_out);
 
-  static BreakLocation FromPosition(Handle<DebugInfo> debug_info,
-                                    BreakLocatorType type, int position,
-                                    BreakPositionAlignment alignment);
-
-  bool IsDebugBreak() const;
-
-  inline bool IsReturn() const {
-    return RelocInfo::IsDebugBreakSlotAtReturn(rmode_);
+  inline bool IsReturn() const { return type_ == DEBUG_BREAK_SLOT_AT_RETURN; }
+  inline bool IsCall() const { return type_ == DEBUG_BREAK_SLOT_AT_CALL; }
+  inline bool IsTailCall() const {
+    return type_ == DEBUG_BREAK_SLOT_AT_TAIL_CALL;
   }
-  inline bool IsCall() const {
-    return RelocInfo::IsDebugBreakSlotAtCall(rmode_);
-  }
-  inline bool IsConstructCall() const {
-    return RelocInfo::IsDebugBreakSlotAtConstructCall(rmode_);
-  }
-  inline int CallArgumentsCount() const {
-    DCHECK(IsCall());
-    return RelocInfo::DebugBreakCallArgumentsCount(data_);
+  inline bool IsDebugBreakSlot() const { return type_ >= DEBUG_BREAK_SLOT; }
+  inline bool IsDebuggerStatement() const {
+    return type_ == DEBUGGER_STATEMENT;
   }
 
-  bool IsStepInLocation() const;
-  inline bool HasBreakPoint() const {
-    return debug_info_->HasBreakPoint(pc_offset_);
-  }
-
-  Handle<Object> BreakPointObjects() const;
-
-  void SetBreakPoint(Handle<Object> break_point_object);
-  void ClearBreakPoint(Handle<Object> break_point_object);
-
-  void SetOneShot();
-  void ClearOneShot();
-
-
-  inline RelocInfo rinfo() const {
-    return RelocInfo(pc(), rmode(), data_, code());
-  }
+  bool HasBreakPoint(Handle<DebugInfo> debug_info) const;
 
   inline int position() const { return position_; }
-  inline int statement_position() const { return statement_position_; }
-
-  inline Address pc() const { return code()->entry() + pc_offset_; }
-
-  inline RelocInfo::Mode rmode() const { return rmode_; }
-
-  inline Code* code() const { return debug_info_->code(); }
 
  private:
-  BreakLocation(Handle<DebugInfo> debug_info, RelocInfo* rinfo, int position,
-                int statement_position);
+  BreakLocation(Handle<AbstractCode> abstract_code, DebugBreakType type,
+                int code_offset, int position)
+      : abstract_code_(abstract_code),
+        code_offset_(code_offset),
+        type_(type),
+        position_(position) {
+    DCHECK_NE(NOT_DEBUG_BREAK, type_);
+  }
 
-  class Iterator {
-   public:
-    Iterator(Handle<DebugInfo> debug_info, BreakLocatorType type);
-
-    BreakLocation GetBreakLocation() {
-      return BreakLocation(debug_info_, rinfo(), position(),
-                           statement_position());
-    }
-
-    inline bool Done() const { return reloc_iterator_.done(); }
-    void Next();
-
-    void SkipTo(int count) {
-      while (count-- > 0) Next();
-    }
-
-    inline RelocInfo::Mode rmode() { return reloc_iterator_.rinfo()->rmode(); }
-    inline RelocInfo* rinfo() { return reloc_iterator_.rinfo(); }
-    inline Address pc() { return rinfo()->pc(); }
-    int break_index() const { return break_index_; }
-    inline int position() const { return position_; }
-    inline int statement_position() const { return statement_position_; }
-
-   private:
-    static int GetModeMask(BreakLocatorType type);
-
-    Handle<DebugInfo> debug_info_;
-    RelocIterator reloc_iterator_;
-    int break_index_;
-    int position_;
-    int statement_position_;
-
-    DisallowHeapAllocation no_gc_;
-
-    DISALLOW_COPY_AND_ASSIGN(Iterator);
-  };
-
-  friend class Debug;
-
-  static int BreakIndexFromAddress(Handle<DebugInfo> debug_info,
-                                   BreakLocatorType type, Address pc);
+  static int BreakIndexFromCodeOffset(Handle<DebugInfo> debug_info,
+                                      Handle<AbstractCode> abstract_code,
+                                      int offset);
 
   void SetDebugBreak();
   void ClearDebugBreak();
 
-  inline bool IsDebuggerStatement() const {
-    return RelocInfo::IsDebuggerStatement(rmode_);
-  }
-  inline bool IsDebugBreakSlot() const {
-    return RelocInfo::IsDebugBreakSlot(rmode_);
-  }
-
-  Handle<DebugInfo> debug_info_;
-  int pc_offset_;
-  RelocInfo::Mode rmode_;
-  intptr_t data_;
+  Handle<AbstractCode> abstract_code_;
+  int code_offset_;
+  DebugBreakType type_;
   int position_;
-  int statement_position_;
+
+  friend class CodeBreakIterator;
+  friend class BytecodeArrayBreakIterator;
 };
 
+class BreakIterator {
+ public:
+  static std::unique_ptr<BreakIterator> GetIterator(
+      Handle<DebugInfo> debug_info, Handle<AbstractCode> abstract_code,
+      BreakLocatorType type = ALL_BREAK_LOCATIONS);
+
+  virtual ~BreakIterator() {}
+
+  virtual BreakLocation GetBreakLocation() = 0;
+  virtual bool Done() const = 0;
+  virtual void Next() = 0;
+
+  void SkipTo(int count) {
+    while (count-- > 0) Next();
+  }
+
+  virtual int code_offset() = 0;
+  int break_index() const { return break_index_; }
+  inline int position() const { return position_; }
+  inline int statement_position() const { return statement_position_; }
+
+  virtual bool IsDebugBreak() = 0;
+  virtual void ClearDebugBreak() = 0;
+  virtual void SetDebugBreak() = 0;
+
+ protected:
+  explicit BreakIterator(Handle<DebugInfo> debug_info,
+                         BreakLocatorType break_locator_type);
+
+  int BreakIndexFromPosition(int position, BreakPositionAlignment alignment);
+
+  Isolate* isolate() { return debug_info_->GetIsolate(); }
+
+  Handle<DebugInfo> debug_info_;
+  int break_index_;
+  int position_;
+  int statement_position_;
+  BreakLocatorType break_locator_type_;
+
+ private:
+  DisallowHeapAllocation no_gc_;
+  DISALLOW_COPY_AND_ASSIGN(BreakIterator);
+};
+
+class CodeBreakIterator : public BreakIterator {
+ public:
+  CodeBreakIterator(Handle<DebugInfo> debug_info, BreakLocatorType type);
+  ~CodeBreakIterator() override {}
+
+  BreakLocation GetBreakLocation() override;
+  bool Done() const override { return reloc_iterator_.done(); }
+  void Next() override;
+
+  bool IsDebugBreak() override;
+  void ClearDebugBreak() override;
+  void SetDebugBreak() override;
+
+  void SkipToPosition(int position, BreakPositionAlignment alignment);
+
+  int code_offset() override {
+    return static_cast<int>(rinfo()->pc() -
+                            debug_info_->DebugCode()->instruction_start());
+  }
+
+ private:
+  int GetModeMask(BreakLocatorType type);
+  DebugBreakType GetDebugBreakType();
+
+  RelocInfo::Mode rmode() { return reloc_iterator_.rinfo()->rmode(); }
+  RelocInfo* rinfo() { return reloc_iterator_.rinfo(); }
+
+  RelocIterator reloc_iterator_;
+  SourcePositionTableIterator source_position_iterator_;
+  DISALLOW_COPY_AND_ASSIGN(CodeBreakIterator);
+};
+
+class BytecodeArrayBreakIterator : public BreakIterator {
+ public:
+  BytecodeArrayBreakIterator(Handle<DebugInfo> debug_info,
+                             BreakLocatorType type);
+  ~BytecodeArrayBreakIterator() override {}
+
+  BreakLocation GetBreakLocation() override;
+  bool Done() const override { return source_position_iterator_.done(); }
+  void Next() override;
+
+  bool IsDebugBreak() override;
+  void ClearDebugBreak() override;
+  void SetDebugBreak() override;
+
+  void SkipToPosition(int position, BreakPositionAlignment alignment);
+
+  int code_offset() override { return source_position_iterator_.code_offset(); }
+
+ private:
+  DebugBreakType GetDebugBreakType();
+
+  SourcePositionTableIterator source_position_iterator_;
+  DISALLOW_COPY_AND_ASSIGN(BytecodeArrayBreakIterator);
+};
 
 // Linked list holding debug info objects. The debug info objects are kept as
 // weak handles to avoid a debug info object to keep a function alive.
@@ -204,7 +239,6 @@ class DebugInfoListNode {
   // Next pointer for linked list.
   DebugInfoListNode* next_;
 };
-
 
 
 // Message delivered to the message handler callback. This is either a debugger
@@ -257,7 +291,7 @@ class MessageImpl: public v8::Debug::Message {
 
 
 // Details of the debug event delivered to the debug event listener.
-class EventDetailsImpl : public v8::Debug::EventDetails {
+class EventDetailsImpl : public v8::DebugInterface::EventDetails {
  public:
   EventDetailsImpl(DebugEvent event,
                    Handle<JSObject> exec_state,
@@ -270,6 +304,8 @@ class EventDetailsImpl : public v8::Debug::EventDetails {
   virtual v8::Local<v8::Context> GetEventContext() const;
   virtual v8::Local<v8::Value> GetCallbackData() const;
   virtual v8::Debug::ClientData* GetClientData() const;
+  virtual v8::Isolate* GetIsolate() const;
+
  private:
   DebugEvent event_;  // Debug event causing the break.
   Handle<JSObject> exec_state_;         // Current execution state.
@@ -343,6 +379,28 @@ class LockingCommandMessageQueue BASE_EMBEDDED {
 };
 
 
+class DebugFeatureTracker {
+ public:
+  enum Feature {
+    kActive = 1,
+    kBreakPoint = 2,
+    kStepping = 3,
+    kHeapSnapshot = 4,
+    kAllocationTracking = 5,
+    kProfiler = 6,
+    kLiveEdit = 7,
+  };
+
+  explicit DebugFeatureTracker(Isolate* isolate)
+      : isolate_(isolate), bitfield_(0) {}
+  void Track(Feature feature);
+
+ private:
+  Isolate* isolate_;
+  uint32_t bitfield_;
+};
+
+
 // This class contains the debugger support. The main purpose is to handle
 // setting break points in the code.
 //
@@ -356,19 +414,19 @@ class Debug {
   void OnDebugBreak(Handle<Object> break_points_hit, bool auto_continue);
 
   void OnThrow(Handle<Object> exception);
-  void OnPromiseReject(Handle<JSObject> promise, Handle<Object> value);
+  void OnPromiseReject(Handle<Object> promise, Handle<Object> value);
   void OnCompileError(Handle<Script> script);
   void OnBeforeCompile(Handle<Script> script);
   void OnAfterCompile(Handle<Script> script);
-  void OnPromiseEvent(Handle<JSObject> data);
-  void OnAsyncTaskEvent(Handle<JSObject> data);
+  void OnAsyncTaskEvent(Handle<String> type, Handle<Object> id,
+                        Handle<String> name);
 
   // API facing.
   void SetEventListener(Handle<Object> callback, Handle<Object> data);
   void SetMessageHandler(v8::Debug::MessageHandler handler);
   void EnqueueCommandMessage(Vector<const uint16_t> command,
                              v8::Debug::ClientData* client_data = NULL);
-  MUST_USE_RESULT MaybeHandle<Object> Call(Handle<JSFunction> fun,
+  MUST_USE_RESULT MaybeHandle<Object> Call(Handle<Object> fun,
                                            Handle<Object> data);
   Handle<Context> GetDebugContext();
   void HandleDebugBreak();
@@ -376,7 +434,7 @@ class Debug {
 
   // Internal logic
   bool Load();
-  void Break(Arguments args, JavaScriptFrame*);
+  void Break(JavaScriptFrame* frame);
   void SetAfterBreakTarget(JavaScriptFrame* frame);
 
   // Scripts handling.
@@ -391,39 +449,29 @@ class Debug {
                               int* source_position,
                               BreakPositionAlignment alignment);
   void ClearBreakPoint(Handle<Object> break_point_object);
-  void ClearAllBreakPoints();
-  void FloodWithOneShot(Handle<JSFunction> function,
-                        BreakLocatorType type = ALL_BREAK_LOCATIONS);
-  void FloodBoundFunctionWithOneShot(Handle<JSFunction> function);
-  void FloodDefaultConstructorWithOneShot(Handle<JSFunction> function);
-  void FloodWithOneShotGeneric(Handle<JSFunction> function,
-                               Handle<Object> holder = Handle<Object>());
-  void FloodHandlerWithOneShot();
   void ChangeBreakOnException(ExceptionBreakType type, bool enable);
   bool IsBreakOnException(ExceptionBreakType type);
 
   // Stepping handling.
-  void PrepareStep(StepAction step_action,
-                   int step_count,
-                   StackFrame::Id frame_id);
+  void PrepareStep(StepAction step_action);
+  void PrepareStepIn(Handle<JSFunction> function);
+  void PrepareStepInSuspendedGenerator();
+  void PrepareStepOnThrow();
   void ClearStepping();
   void ClearStepOut();
-  bool IsStepping() { return thread_local_.step_count_ > 0; }
-  bool StepNextContinue(BreakLocation* location, JavaScriptFrame* frame);
-  bool StepInActive() { return thread_local_.step_into_fp_ != 0; }
-  void HandleStepIn(Handle<Object> function_obj, bool is_constructor);
-  bool StepOutActive() { return thread_local_.step_out_fp_ != 0; }
-
-  void GetStepinPositions(JavaScriptFrame* frame, StackFrame::Id frame_id,
-                          List<int>* results_out);
 
   bool PrepareFunctionForBreakPoints(Handle<SharedFunctionInfo> shared);
+  bool GetPossibleBreakpoints(Handle<Script> script, int start_position,
+                              int end_position, std::set<int>* positions);
+
+  void RecordAsyncFunction(Handle<JSGeneratorObject> generator_object);
 
   // Returns whether the operation succeeded. Compilation can only be triggered
   // if a valid closure is passed as the second argument, otherwise the shared
   // function needs to be compiled already.
   bool EnsureDebugInfo(Handle<SharedFunctionInfo> shared,
                        Handle<JSFunction> function);
+  void CreateDebugInfo(Handle<SharedFunctionInfo> shared);
   static Handle<DebugInfo> GetDebugInfo(Handle<SharedFunctionInfo> shared);
 
   template <typename C>
@@ -433,36 +481,33 @@ class Debug {
   Handle<Object> FindSharedFunctionInfoInScript(Handle<Script> script,
                                                 int position);
 
-  // Returns true if the current stub call is patched to call the debugger.
-  static bool IsDebugBreak(Address addr);
-
   static Handle<Object> GetSourceBreakLocations(
       Handle<SharedFunctionInfo> shared,
       BreakPositionAlignment position_aligment);
 
   // Check whether a global object is the debug global object.
-  bool IsDebugGlobal(GlobalObject* global);
+  bool IsDebugGlobal(JSGlobalObject* global);
 
   // Check whether this frame is just about to return.
   bool IsBreakAtReturn(JavaScriptFrame* frame);
 
   // Support for LiveEdit
   void FramesHaveBeenDropped(StackFrame::Id new_break_frame_id,
-                             LiveEdit::FrameDropMode mode,
-                             Object** restarter_frame_function_pointer);
+                             LiveEditFrameDropMode mode);
 
   // Threading support.
   char* ArchiveDebug(char* to);
   char* RestoreDebug(char* from);
   static int ArchiveSpacePerThread();
   void FreeThreadResources() { }
-
-  // Record function from which eval was called.
-  static void RecordEvalCaller(Handle<Script> script);
+  void Iterate(ObjectVisitor* v);
 
   bool CheckExecutionState(int id) {
-    return is_active() && !debug_context().is_null() && break_id() != 0 &&
-           break_id() == id;
+    return CheckExecutionState() && break_id() == id;
+  }
+
+  bool CheckExecutionState() {
+    return is_active() && !debug_context().is_null() && break_id() != 0;
   }
 
   // Flags and states.
@@ -482,10 +527,16 @@ class Debug {
   inline bool in_debug_scope() const {
     return !!base::NoBarrier_Load(&thread_local_.current_debug_scope_);
   }
-  void set_disable_break(bool v) { break_disabled_ = v; }
+  void set_break_points_active(bool v) { break_points_active_ = v; }
+  bool break_points_active() const { return break_points_active_; }
 
   StackFrame::Id break_frame_id() { return thread_local_.break_frame_id_; }
   int break_id() { return thread_local_.break_id_; }
+
+  Handle<Object> return_value() { return thread_local_.return_value_; }
+  void set_return_value(Handle<Object> value) {
+    thread_local_.return_value_ = value;
+  }
 
   // Support for embedding into generated code.
   Address is_active_address() {
@@ -496,16 +547,17 @@ class Debug {
     return reinterpret_cast<Address>(&after_break_target_);
   }
 
-  Address restarter_frame_function_pointer_address() {
-    Object*** address = &thread_local_.restarter_frame_function_pointer_;
-    return reinterpret_cast<Address>(address);
+  Address last_step_action_address() {
+    return reinterpret_cast<Address>(&thread_local_.last_step_action_);
   }
 
-  Address step_in_fp_addr() {
-    return reinterpret_cast<Address>(&thread_local_.step_into_fp_);
+  Address suspended_generator_address() {
+    return reinterpret_cast<Address>(&thread_local_.suspended_generator_);
   }
 
   StepAction last_step_action() { return thread_local_.last_step_action_; }
+
+  DebugFeatureTracker* feature_tracker() { return &feature_tracker_; }
 
  private:
   explicit Debug(Isolate* isolate);
@@ -523,6 +575,14 @@ class Debug {
     return break_disabled_ || in_debug_event_listener_;
   }
 
+  void clear_suspended_generator() {
+    thread_local_.suspended_generator_ = Smi::kZero;
+  }
+
+  bool has_suspended_generator() const {
+    return thread_local_.suspended_generator_ != Smi::kZero;
+  }
+
   void OnException(Handle<Object> exception, Handle<Object> promise);
 
   // Constructors for debug event objects.
@@ -535,16 +595,12 @@ class Debug {
       Handle<Object> promise);
   MUST_USE_RESULT MaybeHandle<Object> MakeCompileEvent(
       Handle<Script> script, v8::DebugEvent type);
-  MUST_USE_RESULT MaybeHandle<Object> MakePromiseEvent(
-      Handle<JSObject> promise_event);
-  MUST_USE_RESULT MaybeHandle<Object> MakeAsyncTaskEvent(
-      Handle<JSObject> task_event);
+  MUST_USE_RESULT MaybeHandle<Object> MakeAsyncTaskEvent(Handle<String> type,
+                                                         Handle<Object> id,
+                                                         Handle<String> name);
 
   // Mirror cache handling.
   void ClearMirrorCache();
-
-  MaybeHandle<Object> PromiseHasUserDefinedRejectHandler(
-      Handle<JSObject> promise);
 
   void CallEventCallback(v8::DebugEvent event,
                          Handle<Object> exec_state,
@@ -560,13 +616,27 @@ class Debug {
                             bool auto_continue);
   void InvokeMessageHandler(MessageImpl message);
 
+  // Find the closest source position for a break point for a given position.
+  int FindBreakablePosition(Handle<DebugInfo> debug_info, int source_position,
+                            BreakPositionAlignment alignment);
+  // Instrument code to break at break points.
+  void ApplyBreakPoints(Handle<DebugInfo> debug_info);
+  // Clear code from instrumentation.
+  void ClearBreakPoints(Handle<DebugInfo> debug_info);
+  // Clear all code from instrumentation.
+  void ClearAllBreakPoints();
+  // Instrument a function with one-shots.
+  void FloodWithOneShot(Handle<JSFunction> function,
+                        BreakLocatorType type = ALL_BREAK_LOCATIONS);
+  // Clear all one-shot instrumentations, but restore break points.
   void ClearOneShot();
-  void ActivateStepIn(StackFrame* frame);
-  void ClearStepIn();
+
   void ActivateStepOut(StackFrame* frame);
-  void ClearStepNext();
   void RemoveDebugInfoAndClearFromShared(Handle<DebugInfo> debug_info);
-  Handle<Object> CheckBreakPoints(Handle<Object> break_point);
+  Handle<Object> CheckBreakPoints(Handle<DebugInfo> debug_info,
+                                  BreakLocation* location,
+                                  bool* has_break_points = nullptr);
+  bool IsMutedAtCurrentLocation(JavaScriptFrame* frame);
   bool CheckBreakPoint(Handle<Object> break_point_object);
   MaybeHandle<Object> CallFunction(const char* name, int argc,
                                    Handle<Object> args[]);
@@ -577,6 +647,8 @@ class Debug {
   }
 
   void ThreadInit();
+
+  void PrintBreakLocation();
 
   // Global handles.
   Handle<Context> debug_context_;
@@ -592,8 +664,8 @@ class Debug {
   bool is_active_;
   bool is_suppressed_;
   bool live_edit_enabled_;
-  bool has_break_points_;
   bool break_disabled_;
+  bool break_points_active_;
   bool in_debug_event_listener_;
   bool break_on_exception_;
   bool break_on_uncaught_exception_;
@@ -604,6 +676,9 @@ class Debug {
   // Note that this address is not GC safe.  It should be computed immediately
   // before returning to the DebugBreakCallHelper.
   Address after_break_target_;
+
+  // Used to collect histogram data on debugger feature usage.
+  DebugFeatureTracker feature_tracker_;
 
   // Per-thread data.
   class ThreadLocal {
@@ -626,30 +701,21 @@ class Debug {
     // Source statement position from last step next action.
     int last_statement_position_;
 
-    // Number of steps left to perform before debug event.
-    int step_count_;
-
     // Frame pointer from last step next or step frame action.
     Address last_fp_;
 
-    // Number of queued steps left to perform before debug event.
-    int queued_step_count_;
-
-    // Frame pointer for frame from which step in was performed.
-    Address step_into_fp_;
-
-    // Frame pointer for the frame where debugger should be called when current
-    // step out action is completed.
-    Address step_out_fp_;
+    // Frame pointer of the target frame we want to arrive at.
+    Address target_fp_;
 
     // Stores the way how LiveEdit has patched the stack. It is used when
     // debugger returns control back to user script.
-    LiveEdit::FrameDropMode frame_drop_mode_;
+    LiveEditFrameDropMode frame_drop_mode_;
 
-    // When restarter frame is on stack, stores the address
-    // of the pointer to function being restarted. Otherwise (most of the time)
-    // stores NULL. This pointer is used with 'step in' implementation.
-    Object** restarter_frame_function_pointer_;
+    // Value of accumulator in interpreter frames. In non-interpreter frames
+    // this value will be the hole.
+    Handle<Object> return_value_;
+
+    Object* suspended_generator_;
   };
 
   // Storage location for registers when handling debug break calls
@@ -691,6 +757,7 @@ class DebugScope BASE_EMBEDDED {
   DebugScope* prev_;               // Previous scope if entered recursively.
   StackFrame::Id break_frame_id_;  // Previous break frame id.
   int break_id_;                   // Previous break id.
+  Handle<Object> return_value_;    // Previous result.
   bool failed_;                    // Did the debug context fail to load?
   SaveContext save_;               // Saves previous context.
   PostponeInterruptsScope no_termination_exceptons_;
@@ -746,8 +813,6 @@ class DebugCodegen : public AllStatic {
   static void GenerateDebugBreakStub(MacroAssembler* masm,
                                      DebugBreakCallHelperMode mode);
 
-  static void GeneratePlainReturnLiveEdit(MacroAssembler* masm);
-
   // FrameDropper is a code replacement for a JavaScript frame with possibly
   // several frames above.
   // There is no calling conventions here, because it never actually gets
@@ -755,14 +820,16 @@ class DebugCodegen : public AllStatic {
   static void GenerateFrameDropperLiveEdit(MacroAssembler* masm);
 
 
-  static void GenerateSlot(MacroAssembler* masm, RelocInfo::Mode mode,
-                           int call_argc = -1);
+  static void GenerateSlot(MacroAssembler* masm, RelocInfo::Mode mode);
 
-  static void PatchDebugBreakSlot(Address pc, Handle<Code> code);
-  static void ClearDebugBreakSlot(Address pc);
+  static void PatchDebugBreakSlot(Isolate* isolate, Address pc,
+                                  Handle<Code> code);
+  static bool DebugBreakSlotIsPatched(Address pc);
+  static void ClearDebugBreakSlot(Isolate* isolate, Address pc);
 };
 
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_DEBUG_DEBUG_H_

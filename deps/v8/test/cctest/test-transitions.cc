@@ -2,9 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// TODO(mythria): Remove this define after this flag is turned on globally
-#define V8_IMMINENT_DEPRECATION_WARNINGS
-
 #include <stdlib.h>
 #include <utility>
 
@@ -13,7 +10,12 @@
 #include "src/compilation-cache.h"
 #include "src/execution.h"
 #include "src/factory.h"
+#include "src/field-type.h"
 #include "src/global-handles.h"
+// FIXME(mstarzinger, marja): This is weird, but required because of the missing
+// (disallowed) include: src/field-type.h -> src/objects-inl.h
+#include "src/objects-inl.h"
+#include "src/transitions.h"
 #include "test/cctest/cctest.h"
 
 using namespace v8::internal;
@@ -54,13 +56,13 @@ TEST(TransitionArray_SimpleFieldTransitions) {
 
   Handle<Map> map0 = Map::Create(isolate, 0);
   Handle<Map> map1 =
-      Map::CopyWithField(map0, name1, handle(HeapType::Any(), isolate),
-                         attributes, Representation::Tagged(),
-                         OMIT_TRANSITION).ToHandleChecked();
+      Map::CopyWithField(map0, name1, handle(FieldType::Any(), isolate),
+                         attributes, Representation::Tagged(), OMIT_TRANSITION)
+          .ToHandleChecked();
   Handle<Map> map2 =
-      Map::CopyWithField(map0, name2, handle(HeapType::Any(), isolate),
-                         attributes, Representation::Tagged(),
-                         OMIT_TRANSITION).ToHandleChecked();
+      Map::CopyWithField(map0, name2, handle(FieldType::Any(), isolate),
+                         attributes, Representation::Tagged(), OMIT_TRANSITION)
+          .ToHandleChecked();
 
   CHECK(map0->raw_transitions()->IsSmi());
 
@@ -87,7 +89,9 @@ TEST(TransitionArray_SimpleFieldTransitions) {
           (key == *name2 && target == *map2));
   }
 
-  DCHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#ifdef DEBUG
+  CHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#endif
 }
 
 
@@ -103,13 +107,13 @@ TEST(TransitionArray_FullFieldTransitions) {
 
   Handle<Map> map0 = Map::Create(isolate, 0);
   Handle<Map> map1 =
-      Map::CopyWithField(map0, name1, handle(HeapType::Any(), isolate),
-                         attributes, Representation::Tagged(),
-                         OMIT_TRANSITION).ToHandleChecked();
+      Map::CopyWithField(map0, name1, handle(FieldType::Any(), isolate),
+                         attributes, Representation::Tagged(), OMIT_TRANSITION)
+          .ToHandleChecked();
   Handle<Map> map2 =
-      Map::CopyWithField(map0, name2, handle(HeapType::Any(), isolate),
-                         attributes, Representation::Tagged(),
-                         OMIT_TRANSITION).ToHandleChecked();
+      Map::CopyWithField(map0, name2, handle(FieldType::Any(), isolate),
+                         attributes, Representation::Tagged(), OMIT_TRANSITION)
+          .ToHandleChecked();
 
   CHECK(map0->raw_transitions()->IsSmi());
 
@@ -136,7 +140,9 @@ TEST(TransitionArray_FullFieldTransitions) {
           (key == *name2 && target == *map2));
   }
 
-  DCHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#ifdef DEBUG
+  CHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#endif
 }
 
 
@@ -158,10 +164,10 @@ TEST(TransitionArray_DifferentFieldNames) {
     EmbeddedVector<char, 64> buffer;
     SNPrintF(buffer, "prop%d", i);
     Handle<String> name = factory->InternalizeUtf8String(buffer.start());
-    Handle<Map> map =
-        Map::CopyWithField(map0, name, handle(HeapType::Any(), isolate),
-                           attributes, Representation::Tagged(),
-                           OMIT_TRANSITION).ToHandleChecked();
+    Handle<Map> map = Map::CopyWithField(
+                          map0, name, handle(FieldType::Any(), isolate),
+                          attributes, Representation::Tagged(), OMIT_TRANSITION)
+                          .ToHandleChecked();
     names[i] = name;
     maps[i] = map;
 
@@ -183,7 +189,9 @@ TEST(TransitionArray_DifferentFieldNames) {
     }
   }
 
-  DCHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#ifdef DEBUG
+  CHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#endif
 }
 
 
@@ -205,10 +213,10 @@ TEST(TransitionArray_SameFieldNamesDifferentAttributesSimple) {
   for (int i = 0; i < ATTRS_COUNT; i++) {
     PropertyAttributes attributes = static_cast<PropertyAttributes>(i);
 
-    Handle<Map> map =
-        Map::CopyWithField(map0, name, handle(HeapType::Any(), isolate),
-                           attributes, Representation::Tagged(),
-                           OMIT_TRANSITION).ToHandleChecked();
+    Handle<Map> map = Map::CopyWithField(
+                          map0, name, handle(FieldType::Any(), isolate),
+                          attributes, Representation::Tagged(), OMIT_TRANSITION)
+                          .ToHandleChecked();
     attr_maps[i] = map;
 
     TransitionArray::Insert(map0, name, map, PROPERTY_TRANSITION);
@@ -224,7 +232,9 @@ TEST(TransitionArray_SameFieldNamesDifferentAttributesSimple) {
     CHECK_EQ(*name, TransitionArray::GetKey(map0->raw_transitions(), i));
   }
 
-  DCHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#ifdef DEBUG
+  CHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#endif
 }
 
 
@@ -247,9 +257,9 @@ TEST(TransitionArray_SameFieldNamesDifferentAttributes) {
     SNPrintF(buffer, "prop%d", i);
     Handle<String> name = factory->InternalizeUtf8String(buffer.start());
     Handle<Map> map =
-        Map::CopyWithField(map0, name, handle(HeapType::Any(), isolate), NONE,
-                           Representation::Tagged(),
-                           OMIT_TRANSITION).ToHandleChecked();
+        Map::CopyWithField(map0, name, handle(FieldType::Any(), isolate), NONE,
+                           Representation::Tagged(), OMIT_TRANSITION)
+            .ToHandleChecked();
     names[i] = name;
     maps[i] = map;
 
@@ -265,10 +275,10 @@ TEST(TransitionArray_SameFieldNamesDifferentAttributes) {
   for (int i = 0; i < ATTRS_COUNT; i++) {
     PropertyAttributes attributes = static_cast<PropertyAttributes>(i);
 
-    Handle<Map> map =
-        Map::CopyWithField(map0, name, handle(HeapType::Any(), isolate),
-                           attributes, Representation::Tagged(),
-                           OMIT_TRANSITION).ToHandleChecked();
+    Handle<Map> map = Map::CopyWithField(
+                          map0, name, handle(FieldType::Any(), isolate),
+                          attributes, Representation::Tagged(), OMIT_TRANSITION)
+                          .ToHandleChecked();
     attr_maps[i] = map;
 
     TransitionArray::Insert(map0, name, map, PROPERTY_TRANSITION);
@@ -302,5 +312,7 @@ TEST(TransitionArray_SameFieldNamesDifferentAttributes) {
     }
   }
 
-  DCHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#ifdef DEBUG
+  CHECK(TransitionArray::IsSortedNoDuplicates(*map0));
+#endif
 }

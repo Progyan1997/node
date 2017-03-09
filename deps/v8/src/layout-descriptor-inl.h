@@ -18,7 +18,7 @@ LayoutDescriptor* LayoutDescriptor::FromSmi(Smi* smi) {
 Handle<LayoutDescriptor> LayoutDescriptor::New(Isolate* isolate, int length) {
   if (length <= kSmiValueSize) {
     // The whole bit vector fits into a smi.
-    return handle(LayoutDescriptor::FromSmi(Smi::FromInt(0)), isolate);
+    return handle(LayoutDescriptor::FromSmi(Smi::kZero), isolate);
   }
   length = GetSlowModeBackingStoreLength(length);
   return Handle<LayoutDescriptor>::cast(isolate->factory()->NewFixedTypedArray(
@@ -37,7 +37,7 @@ bool LayoutDescriptor::InobjectUnboxedField(int inobject_properties,
 
 
 LayoutDescriptor* LayoutDescriptor::FastPointerLayout() {
-  return LayoutDescriptor::FromSmi(Smi::FromInt(0));
+  return LayoutDescriptor::FromSmi(Smi::kZero);
 }
 
 
@@ -62,8 +62,8 @@ LayoutDescriptor* LayoutDescriptor::SetRawData(int field_index) {
 
 
 LayoutDescriptor* LayoutDescriptor::SetTagged(int field_index, bool tagged) {
-  int layout_word_index;
-  int layout_bit_index;
+  int layout_word_index = 0;
+  int layout_bit_index = 0;
 
   if (!GetIndexes(field_index, &layout_word_index, &layout_bit_index)) {
     CHECK(false);
@@ -250,7 +250,7 @@ bool LayoutDescriptorHelper::IsTagged(int offset_in_bytes) {
 
   return layout_descriptor_->IsTagged(field_index);
 }
-}
-}  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_LAYOUT_DESCRIPTOR_INL_H_

@@ -8,6 +8,7 @@
 #include "include/v8-platform.h"
 #include "src/base/macros.h"
 #include "src/cancelable-task.h"
+#include "src/globals.h"
 
 namespace v8 {
 namespace internal {
@@ -79,7 +80,7 @@ class Heap;
 // now_ms is the current time,
 // t' is t if the current event is not a GC event and is now_ms otherwise,
 // long_delay_ms, short_delay_ms, and watchdog_delay_ms are constants.
-class MemoryReducer {
+class V8_EXPORT_PRIVATE MemoryReducer {
  public:
   enum Action { kDone, kWait, kRun };
 
@@ -96,32 +97,30 @@ class MemoryReducer {
     double last_gc_time_ms;
   };
 
-  enum EventType {
-    kTimer,
-    kMarkCompact,
-    kContextDisposed,
-    kBackgroundIdleNotification
-  };
+  enum EventType { kTimer, kMarkCompact, kPossibleGarbage };
 
   struct Event {
     EventType type;
     double time_ms;
-    bool low_allocation_rate;
     bool next_gc_likely_to_collect_more;
+    bool should_start_incremental_gc;
     bool can_start_incremental_gc;
   };
 
   explicit MemoryReducer(Heap* heap)
-      : heap_(heap), state_(kDone, 0, 0.0, 0.0) {}
+      : heap_(heap),
+        state_(kDone, 0, 0.0, 0.0),
+        js_calls_counter_(0),
+        js_calls_sample_time_ms_(0.0) {}
   // Callbacks.
   void NotifyMarkCompact(const Event& event);
-  void NotifyContextDisposed(const Event& event);
+  void NotifyPossibleGarbage(const Event& event);
   void NotifyBackgroundIdleNotification(const Event& event);
   // The step function that computes the next state from the current state and
   // the incoming event.
   static State Step(const State& state, const Event& event);
   // Posts a timer task that will call NotifyTimer after the given delay.
-  void ScheduleTimer(double delay_ms);
+  void ScheduleTimer(double time_ms, double delay_ms);
   void TearDown();
   static const int kLongDelayMs;
   static const int kShortDelayMs;
@@ -152,6 +151,11 @@ class MemoryReducer {
 
   Heap* heap_;
   State state_;
+  unsigned int js_calls_counter_;
+  double js_calls_sample_time_ms_;
+
+  // Used in cctest.
+  friend class HeapTester;
   DISALLOW_COPY_AND_ASSIGN(MemoryReducer);
 };
 

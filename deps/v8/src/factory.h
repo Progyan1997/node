@@ -5,25 +5,40 @@
 #ifndef V8_FACTORY_H_
 #define V8_FACTORY_H_
 
+#include "src/globals.h"
 #include "src/isolate.h"
 #include "src/messages.h"
+#include "src/type-feedback-vector.h"
 
 namespace v8 {
 namespace internal {
 
-class StaticFeedbackVectorSpec;
+enum FunctionMode {
+  // With prototype.
+  FUNCTION_WITH_WRITEABLE_PROTOTYPE,
+  FUNCTION_WITH_READONLY_PROTOTYPE,
+  // Without prototype.
+  FUNCTION_WITHOUT_PROTOTYPE
+};
 
 // Interface for handle based allocation.
-class Factory final {
+class V8_EXPORT_PRIVATE Factory final {
  public:
   Handle<Oddball> NewOddball(Handle<Map> map, const char* to_string,
                              Handle<Object> to_number, const char* type_of,
                              byte kind);
 
   // Allocates a fixed array initialized with undefined values.
-  Handle<FixedArray> NewFixedArray(
-      int size,
-      PretenureFlag pretenure = NOT_TENURED);
+  Handle<FixedArray> NewFixedArray(int size,
+                                   PretenureFlag pretenure = NOT_TENURED);
+  // Tries allocating a fixed array initialized with undefined values.
+  // In case of an allocation failure (OOM) an empty handle is returned.
+  // The caller has to manually signal an
+  // v8::internal::Heap::FatalProcessOutOfMemory typically by calling
+  // NewFixedArray as a fallback.
+  MUST_USE_RESULT
+  MaybeHandle<FixedArray> TryNewFixedArray(
+      int size, PretenureFlag pretenure = NOT_TENURED);
 
   // Allocate a new fixed array with non-existing entries (the hole).
   Handle<FixedArray> NewFixedArrayWithHoles(
@@ -45,19 +60,38 @@ class Factory final {
       int size,
       PretenureFlag pretenure = NOT_TENURED);
 
+  Handle<FrameArray> NewFrameArray(int number_of_frames,
+                                   PretenureFlag pretenure = NOT_TENURED);
+
   Handle<OrderedHashSet> NewOrderedHashSet();
   Handle<OrderedHashMap> NewOrderedHashMap();
 
   // Create a new boxed value.
   Handle<Box> NewBox(Handle<Object> value);
 
+  // Create a new PromiseReactionJobInfo struct.
+  Handle<PromiseReactionJobInfo> NewPromiseReactionJobInfo(
+      Handle<Object> value, Handle<Object> tasks, Handle<Object> deferred,
+      Handle<Object> debug_id, Handle<Object> debug_name,
+      Handle<Context> context);
+
+  // Create a new PromiseResolveThenableJobInfo struct.
+  Handle<PromiseResolveThenableJobInfo> NewPromiseResolveThenableJobInfo(
+      Handle<JSReceiver> thenable, Handle<JSReceiver> then,
+      Handle<JSFunction> resolve, Handle<JSFunction> reject,
+      Handle<Object> debug_id, Handle<Object> debug_name,
+      Handle<Context> context);
+
   // Create a new PrototypeInfo struct.
   Handle<PrototypeInfo> NewPrototypeInfo();
 
-  // Create a new SloppyBlockWithEvalContextExtension struct.
-  Handle<SloppyBlockWithEvalContextExtension>
-  NewSloppyBlockWithEvalContextExtension(Handle<ScopeInfo> scope_info,
-                                         Handle<JSObject> extension);
+  // Create a new Tuple3 struct.
+  Handle<Tuple3> NewTuple3(Handle<Object> value1, Handle<Object> value2,
+                           Handle<Object> value3);
+
+  // Create a new ContextExtension struct.
+  Handle<ContextExtension> NewContextExtension(Handle<ScopeInfo> scope_info,
+                                               Handle<Object> extension);
 
   // Create a pre-tenured empty AccessorPair.
   Handle<AccessorPair> NewAccessorPair();
@@ -71,7 +105,7 @@ class Factory final {
   Handle<String> InternalizeUtf8String(const char* str) {
     return InternalizeUtf8String(CStrVector(str));
   }
-  Handle<String> InternalizeString(Handle<String> str);
+
   Handle<String> InternalizeOneByteString(Vector<const uint8_t> str);
   Handle<String> InternalizeOneByteString(
       Handle<SeqOneByteString>, int from, int length);
@@ -81,6 +115,16 @@ class Factory final {
   template<class StringTableKey>
   Handle<String> InternalizeStringWithKey(StringTableKey* key);
 
+  // Internalized strings are created in the old generation (data space).
+  Handle<String> InternalizeString(Handle<String> string) {
+    if (string->IsInternalizedString()) return string;
+    return StringTable::LookupString(isolate(), string);
+  }
+
+  Handle<Name> InternalizeName(Handle<Name> name) {
+    if (name->IsUniqueName()) return name;
+    return StringTable::LookupString(isolate(), Handle<String>::cast(name));
+  }
 
   // String creation functions.  Most of the string creation functions take
   // a Heap::PretenureFlag argument to optionally request that they be
@@ -103,8 +147,7 @@ class Factory final {
   //
   // One-byte strings are pretenured when used as keys in the SourceCodeCache.
   MUST_USE_RESULT MaybeHandle<String> NewStringFromOneByte(
-      Vector<const uint8_t> str,
-      PretenureFlag pretenure = NOT_TENURED);
+      Vector<const uint8_t> str, PretenureFlag pretenure = NOT_TENURED);
 
   template <size_t N>
   inline Handle<String> NewStringFromStaticChars(
@@ -147,12 +190,19 @@ class Factory final {
   // UTF8 strings are pretenured when used for regexp literal patterns and
   // flags in the parser.
   MUST_USE_RESULT MaybeHandle<String> NewStringFromUtf8(
-      Vector<const char> str,
+      Vector<const char> str, PretenureFlag pretenure = NOT_TENURED);
+
+  MUST_USE_RESULT MaybeHandle<String> NewStringFromUtf8SubString(
+      Handle<SeqOneByteString> str, int begin, int end,
       PretenureFlag pretenure = NOT_TENURED);
 
   MUST_USE_RESULT MaybeHandle<String> NewStringFromTwoByte(
-      Vector<const uc16> str,
-      PretenureFlag pretenure = NOT_TENURED);
+      Vector<const uc16> str, PretenureFlag pretenure = NOT_TENURED);
+
+  MUST_USE_RESULT MaybeHandle<String> NewStringFromTwoByte(
+      const ZoneVector<uc16>* str, PretenureFlag pretenure = NOT_TENURED);
+
+  Handle<JSStringIterator> NewJSStringIterator(Handle<String> string);
 
   // Allocates an internalized string in old space based on the character
   // stream.
@@ -195,6 +245,10 @@ class Factory final {
   MUST_USE_RESULT MaybeHandle<String> NewConsString(Handle<String> left,
                                                     Handle<String> right);
 
+  // Create or lookup a single characters tring made up of a utf16 surrogate
+  // pair.
+  Handle<String> NewSurrogatePairString(uint16_t lead, uint16_t trail);
+
   // Create a new string object which holds a proper substring of a string.
   Handle<String> NewProperSubString(Handle<String> str,
                                     int begin,
@@ -215,10 +269,14 @@ class Factory final {
       const ExternalOneByteString::Resource* resource);
   MUST_USE_RESULT MaybeHandle<String> NewExternalStringFromTwoByte(
       const ExternalTwoByteString::Resource* resource);
+  // Create a new external string object for one-byte encoded native script.
+  // It does not cache the resource data pointer.
+  Handle<ExternalOneByteString> NewNativeSourceString(
+      const ExternalOneByteString::Resource* resource);
 
   // Create a symbol.
   Handle<Symbol> NewSymbol();
-  Handle<Symbol> NewPrivateSymbol(Handle<Object> name);
+  Handle<Symbol> NewPrivateSymbol();
 
   // Create a global (but otherwise uninitialized) context.
   Handle<Context> NewNativeContext();
@@ -231,7 +289,9 @@ class Factory final {
   Handle<ScriptContextTable> NewScriptContextTable();
 
   // Create a module context.
-  Handle<Context> NewModuleContext(Handle<ScopeInfo> scope_info);
+  Handle<Context> NewModuleContext(Handle<Module> module,
+                                   Handle<JSFunction> function,
+                                   Handle<ScopeInfo> scope_info);
 
   // Create a function context.
   Handle<Context> NewFunctionContext(int length, Handle<JSFunction> function);
@@ -239,29 +299,37 @@ class Factory final {
   // Create a catch context.
   Handle<Context> NewCatchContext(Handle<JSFunction> function,
                                   Handle<Context> previous,
+                                  Handle<ScopeInfo> scope_info,
                                   Handle<String> name,
                                   Handle<Object> thrown_object);
 
   // Create a 'with' context.
   Handle<Context> NewWithContext(Handle<JSFunction> function,
                                  Handle<Context> previous,
+                                 Handle<ScopeInfo> scope_info,
                                  Handle<JSReceiver> extension);
+
+  Handle<Context> NewDebugEvaluateContext(Handle<Context> previous,
+                                          Handle<ScopeInfo> scope_info,
+                                          Handle<JSReceiver> extension,
+                                          Handle<Context> wrapped,
+                                          Handle<StringSet> whitelist);
 
   // Create a block context.
   Handle<Context> NewBlockContext(Handle<JSFunction> function,
                                   Handle<Context> previous,
                                   Handle<ScopeInfo> scope_info);
+  // Create a promise context.
+  Handle<Context> NewPromiseResolvingFunctionContext(int length);
 
   // Allocate a new struct.  The struct is pretenured (allocated directly in
   // the old generation).
   Handle<Struct> NewStruct(InstanceType type);
 
-  Handle<CodeCache> NewCodeCache();
-
   Handle<AliasedArgumentsEntry> NewAliasedArgumentsEntry(
       int aliased_context_slot);
 
-  Handle<ExecutableAccessorInfo> NewExecutableAccessorInfo();
+  Handle<AccessorInfo> NewAccessorInfo();
 
   Handle<Script> NewScript(Handle<String> source);
 
@@ -294,6 +362,8 @@ class Factory final {
 
   Handle<WeakCell> NewWeakCell(Handle<HeapObject> value);
 
+  Handle<TransitionArray> NewTransitionArray(int capacity);
+
   // Allocate a tenured AllocationSite. It's payload is null.
   Handle<AllocationSite> NewAllocationSite();
 
@@ -320,6 +390,9 @@ class Factory final {
       Handle<FixedArray> array, int grow_by,
       PretenureFlag pretenure = NOT_TENURED);
 
+  Handle<FixedArray> CopyFixedArrayUpTo(Handle<FixedArray> array, int new_len,
+                                        PretenureFlag pretenure = NOT_TENURED);
+
   Handle<FixedArray> CopyFixedArray(Handle<FixedArray> array);
 
   // This method expects a COW array in new space, and creates a copy
@@ -340,8 +413,20 @@ class Factory final {
                                   PretenureFlag pretenure = NOT_TENURED);
   Handle<Object> NewNumberFromSize(size_t value,
                                    PretenureFlag pretenure = NOT_TENURED) {
-    if (Smi::IsValid(static_cast<intptr_t>(value))) {
+    // We can't use Smi::IsValid() here because that operates on a signed
+    // intptr_t, and casting from size_t could create a bogus sign bit.
+    if (value <= static_cast<size_t>(Smi::kMaxValue)) {
       return Handle<Object>(Smi::FromIntptr(static_cast<intptr_t>(value)),
+                            isolate());
+    }
+    return NewNumber(static_cast<double>(value), pretenure);
+  }
+  Handle<Object> NewNumberFromInt64(int64_t value,
+                                    PretenureFlag pretenure = NOT_TENURED) {
+    if (value <= std::numeric_limits<int32_t>::max() &&
+        value >= std::numeric_limits<int32_t>::min() &&
+        Smi::IsValid(static_cast<int32_t>(value))) {
+      return Handle<Object>(Smi::FromInt(static_cast<int32_t>(value)),
                             isolate());
     }
     return NewNumber(static_cast<double>(value), pretenure);
@@ -356,12 +441,6 @@ class Factory final {
   SIMD128_TYPES(SIMD128_NEW_DECL)
 #undef SIMD128_NEW_DECL
 
-  // These objects are used by the api to create env-independent data
-  // structures in the heap.
-  inline Handle<JSObject> NewNeanderObject() {
-    return NewJSObjectFromMap(neander_map());
-  }
-
   Handle<JSWeakMap> NewJSWeakMap();
 
   Handle<JSObject> NewArgumentsObject(Handle<JSFunction> callee, int length);
@@ -370,12 +449,11 @@ class Factory final {
   // runtime.
   Handle<JSObject> NewJSObject(Handle<JSFunction> constructor,
                                PretenureFlag pretenure = NOT_TENURED);
-  // JSObject that should have a memento pointing to the allocation site.
-  Handle<JSObject> NewJSObjectWithMemento(Handle<JSFunction> constructor,
-                                          Handle<AllocationSite> site);
+  // JSObject without a prototype.
+  Handle<JSObject> NewJSObjectWithNullProto();
 
   // Global objects are pretenured and initialized based on a constructor.
-  Handle<GlobalObject> NewGlobalObject(Handle<JSFunction> constructor);
+  Handle<JSGlobalObject> NewJSGlobalObject(Handle<JSFunction> constructor);
 
   // JS objects are pretenured when allocated by the bootstrapper and
   // runtime.
@@ -384,49 +462,36 @@ class Factory final {
       PretenureFlag pretenure = NOT_TENURED,
       Handle<AllocationSite> allocation_site = Handle<AllocationSite>::null());
 
-  // JS modules are pretenured.
-  Handle<JSModule> NewJSModule(Handle<Context> context,
-                               Handle<ScopeInfo> scope_info);
-
   // JS arrays are pretenured when allocated by the parser.
-
-  // Create a JSArray with no elements.
-  Handle<JSArray> NewJSArray(ElementsKind elements_kind,
-                             Strength strength = Strength::WEAK,
-                             PretenureFlag pretenure = NOT_TENURED);
 
   // Create a JSArray with a specified length and elements initialized
   // according to the specified mode.
   Handle<JSArray> NewJSArray(
       ElementsKind elements_kind, int length, int capacity,
-      Strength strength = Strength::WEAK,
       ArrayStorageAllocationMode mode = DONT_INITIALIZE_ARRAY_ELEMENTS,
       PretenureFlag pretenure = NOT_TENURED);
 
   Handle<JSArray> NewJSArray(
       int capacity, ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
-      Strength strength = Strength::WEAK,
       PretenureFlag pretenure = NOT_TENURED) {
     if (capacity != 0) {
       elements_kind = GetHoleyElementsKind(elements_kind);
     }
-    return NewJSArray(elements_kind, 0, capacity, strength,
+    return NewJSArray(elements_kind, 0, capacity,
                       INITIALIZE_ARRAY_ELEMENTS_WITH_HOLE, pretenure);
   }
 
   // Create a JSArray with the given elements.
   Handle<JSArray> NewJSArrayWithElements(Handle<FixedArrayBase> elements,
                                          ElementsKind elements_kind, int length,
-                                         Strength strength = Strength::WEAK,
                                          PretenureFlag pretenure = NOT_TENURED);
 
   Handle<JSArray> NewJSArrayWithElements(
       Handle<FixedArrayBase> elements,
       ElementsKind elements_kind = TERMINAL_FAST_ELEMENTS_KIND,
-      Strength strength = Strength::WEAK,
       PretenureFlag pretenure = NOT_TENURED) {
     return NewJSArrayWithElements(elements, elements_kind, elements->length(),
-                                  strength, pretenure);
+                                  pretenure);
   }
 
   void NewJSArrayStorage(
@@ -436,6 +501,10 @@ class Factory final {
       ArrayStorageAllocationMode mode = DONT_INITIALIZE_ARRAY_ELEMENTS);
 
   Handle<JSGeneratorObject> NewJSGeneratorObject(Handle<JSFunction> function);
+
+  Handle<JSModuleNamespace> NewJSModuleNamespace();
+
+  Handle<Module> NewModule(Handle<SharedFunctionInfo> code);
 
   Handle<JSArrayBuffer> NewJSArrayBuffer(
       SharedFlag shared = SharedFlag::kNotShared,
@@ -462,6 +531,8 @@ class Factory final {
   Handle<JSDataView> NewJSDataView(Handle<JSArrayBuffer> buffer,
                                    size_t byte_offset, size_t byte_length);
 
+  Handle<JSIteratorResult> NewJSIteratorResult(Handle<Object> value, bool done);
+
   Handle<JSMap> NewJSMap();
   Handle<JSSet> NewJSSet();
 
@@ -469,19 +540,17 @@ class Factory final {
   Handle<JSMapIterator> NewJSMapIterator();
   Handle<JSSetIterator> NewJSSetIterator();
 
-  // Creates a new JSIteratorResult object with the arguments {value} and
-  // {done}.  Implemented according to ES6 section 7.4.7 CreateIterResultObject.
-  Handle<JSIteratorResult> NewJSIteratorResult(Handle<Object> value,
-                                               Handle<Object> done);
+  Handle<JSFixedArrayIterator> NewJSFixedArrayIterator(
+      Handle<FixedArray> array);
+
+  // Allocates a bound function.
+  MaybeHandle<JSBoundFunction> NewJSBoundFunction(
+      Handle<JSReceiver> target_function, Handle<Object> bound_this,
+      Vector<Handle<Object>> bound_args);
 
   // Allocates a Harmony proxy.
-  Handle<JSProxy> NewJSProxy(Handle<Object> handler, Handle<Object> prototype);
-
-  // Allocates a Harmony function proxy.
-  Handle<JSProxy> NewJSFunctionProxy(Handle<Object> handler,
-                                     Handle<JSReceiver> call_trap,
-                                     Handle<Object> construct_trap,
-                                     Handle<Object> prototype);
+  Handle<JSProxy> NewJSProxy(Handle<JSReceiver> target,
+                             Handle<JSReceiver> handler);
 
   // Reinitialize an JSGlobalProxy based on a constructor.  The object
   // must have the same size as objects allocated using the
@@ -490,15 +559,14 @@ class Factory final {
   void ReinitializeJSGlobalProxy(Handle<JSGlobalProxy> global,
                                  Handle<JSFunction> constructor);
 
-  Handle<JSGlobalProxy> NewUninitializedJSGlobalProxy();
+  Handle<JSGlobalProxy> NewUninitializedJSGlobalProxy(int size);
 
-  // Change the type of the argument into a JS object/function and reinitialize.
-  void BecomeJSObject(Handle<JSProxy> object);
-  void BecomeJSFunction(Handle<JSProxy> object);
-
+  Handle<JSFunction> NewFunction(Handle<Map> map,
+                                 Handle<SharedFunctionInfo> info,
+                                 Handle<Object> context_or_undefined,
+                                 PretenureFlag pretenure = TENURED);
   Handle<JSFunction> NewFunction(Handle<String> name, Handle<Code> code,
                                  Handle<Object> prototype,
-                                 bool read_only_prototype = false,
                                  bool is_strict = false);
   Handle<JSFunction> NewFunction(Handle<String> name);
   Handle<JSFunction> NewFunctionWithoutPrototype(Handle<String> name,
@@ -506,23 +574,29 @@ class Factory final {
                                                  bool is_strict = false);
 
   Handle<JSFunction> NewFunctionFromSharedFunctionInfo(
-      Handle<SharedFunctionInfo> function_info,
-      Handle<Context> context,
+      Handle<Map> initial_map, Handle<SharedFunctionInfo> function_info,
+      Handle<Object> context_or_undefined, PretenureFlag pretenure = TENURED);
+
+  Handle<JSFunction> NewFunctionFromSharedFunctionInfo(
+      Handle<SharedFunctionInfo> function_info, Handle<Context> context,
       PretenureFlag pretenure = TENURED);
 
   Handle<JSFunction> NewFunction(Handle<String> name, Handle<Code> code,
                                  Handle<Object> prototype, InstanceType type,
                                  int instance_size,
-                                 bool read_only_prototype = false,
-                                 bool install_constructor = false,
                                  bool is_strict = false);
   Handle<JSFunction> NewFunction(Handle<String> name,
                                  Handle<Code> code,
                                  InstanceType type,
                                  int instance_size);
+  Handle<JSFunction> NewFunction(Handle<Map> map, Handle<String> name,
+                                 MaybeHandle<Code> maybe_code);
 
   // Create a serialized scope info.
   Handle<ScopeInfo> NewScopeInfo(int length);
+
+  Handle<ModuleInfoEntry> NewModuleInfoEntry();
+  Handle<ModuleInfo> NewModuleInfo();
 
   // Create an External object for V8's external API.
   Handle<JSObject> NewExternal(void* value);
@@ -540,14 +614,17 @@ class Factory final {
 
   Handle<Code> CopyCode(Handle<Code> code);
 
-  Handle<Code> CopyCode(Handle<Code> code, Vector<byte> reloc_info);
+  Handle<BytecodeArray> CopyBytecodeArray(Handle<BytecodeArray>);
 
   // Interface for creating error objects.
   Handle<Object> NewError(Handle<JSFunction> constructor,
                           Handle<String> message);
 
-  Handle<Object> NewInvalidStringLengthError() {
-    return NewRangeError(MessageTemplate::kInvalidStringLength);
+  Handle<Object> NewInvalidStringLengthError();
+
+  Handle<Object> NewURIError() {
+    return NewError(isolate()->uri_error_function(),
+                    MessageTemplate::kURIMalformed);
   }
 
   Handle<Object> NewError(Handle<JSFunction> constructor,
@@ -567,7 +644,9 @@ class Factory final {
   DECLARE_ERROR(ReferenceError)
   DECLARE_ERROR(SyntaxError)
   DECLARE_ERROR(TypeError)
-#undef DEFINE_ERROR
+  DECLARE_ERROR(WasmCompileError)
+  DECLARE_ERROR(WasmRuntimeError)
+#undef DECLARE_ERROR
 
   Handle<String> NumberToString(Handle<Object> number,
                                 bool check_number_string_cache = true);
@@ -616,19 +695,26 @@ class Factory final {
         &isolate()->heap()->roots_[Heap::k##name##RootIndex])); \
   }
   PUBLIC_SYMBOL_LIST(SYMBOL_ACCESSOR)
+  WELL_KNOWN_SYMBOL_LIST(SYMBOL_ACCESSOR)
 #undef SYMBOL_ACCESSOR
 
   // Allocates a new SharedFunctionInfo object.
   Handle<SharedFunctionInfo> NewSharedFunctionInfo(
       Handle<String> name, int number_of_literals, FunctionKind kind,
-      Handle<Code> code, Handle<ScopeInfo> scope_info,
-      Handle<TypeFeedbackVector> feedback_vector);
+      Handle<Code> code, Handle<ScopeInfo> scope_info);
   Handle<SharedFunctionInfo> NewSharedFunctionInfo(Handle<String> name,
-                                                   MaybeHandle<Code> code);
+                                                   MaybeHandle<Code> code,
+                                                   bool is_constructor);
 
-  // Allocate a new type feedback vector
-  template <typename Spec>
-  Handle<TypeFeedbackVector> NewTypeFeedbackVector(const Spec* spec);
+  static bool IsFunctionModeWithPrototype(FunctionMode function_mode) {
+    return (function_mode == FUNCTION_WITH_WRITEABLE_PROTOTYPE ||
+            function_mode == FUNCTION_WITH_READONLY_PROTOTYPE);
+  }
+
+  Handle<Map> CreateSloppyFunctionMap(FunctionMode function_mode);
+
+  Handle<Map> CreateStrictFunctionMap(FunctionMode function_mode,
+                                      Handle<JSFunction> empty_function);
 
   // Allocates a new JSMessageObject object.
   Handle<JSMessageObject> NewJSMessageObject(MessageTemplate::Template message,
@@ -644,8 +730,9 @@ class Factory final {
   // native context.
   Handle<Map> ObjectLiteralMapFromCache(Handle<Context> context,
                                         int number_of_properties,
-                                        bool is_strong,
                                         bool* is_result_from_cache);
+
+  Handle<RegExpMatchInfo> NewRegExpMatchInfo();
 
   // Creates a new FixedArray that holds the data associated with the
   // atom regexp and stores it in the regexp.
@@ -671,6 +758,9 @@ class Factory final {
   // Converts the given boolean condition to JavaScript boolean value.
   Handle<Object> ToBoolean(bool value);
 
+  // Converts the given ToPrimitive hint to it's string representation.
+  Handle<String> ToPrimitiveHintString(ToPrimitiveHint hint);
+
  private:
   Isolate* isolate() { return reinterpret_cast<Isolate*>(this); }
 
@@ -685,6 +775,9 @@ class Factory final {
                 AllocationSpace space,
                 Handle<AllocationSite> allocation_site);
 
+  MaybeHandle<String> NewStringFromTwoByte(const uc16* string, int length,
+                                           PretenureFlag pretenure);
+
   // Creates a code object that is not yet fully initialized yet.
   inline Handle<Code> NewCodeRaw(int object_size, bool immovable);
 
@@ -695,31 +788,18 @@ class Factory final {
   // Update the cache with a new number-string pair.
   void SetNumberStringCache(Handle<Object> number, Handle<String> string);
 
-  // Initializes a function with a shared part and prototype.
-  // Note: this code was factored out of NewFunction such that other parts of
-  // the VM could use it. Specifically, a function that creates instances of
-  // type JS_FUNCTION_TYPE benefit from the use of this function.
-  inline void InitializeFunction(Handle<JSFunction> function,
-                                 Handle<SharedFunctionInfo> info,
-                                 Handle<Context> context);
+  // Create a JSArray with no elements and no length.
+  Handle<JSArray> NewJSArray(ElementsKind elements_kind,
+                             PretenureFlag pretenure = NOT_TENURED);
 
-  // Creates a function initialized with a shared part.
-  Handle<JSFunction> NewFunction(Handle<Map> map,
-                                 Handle<SharedFunctionInfo> info,
-                                 Handle<Context> context,
-                                 PretenureFlag pretenure = TENURED);
+  void SetFunctionInstanceDescriptor(Handle<Map> map,
+                                     FunctionMode function_mode);
 
-  Handle<JSFunction> NewFunction(Handle<Map> map,
-                                 Handle<String> name,
-                                 MaybeHandle<Code> maybe_code);
-
-  // Reinitialize a JSProxy into an (empty) JS object of respective type and
-  // size, but keeping the original prototype.  The receiver must have at least
-  // the size of the new object.  The object is reinitialized and behaves as an
-  // object that has been freshly allocated.
-  void ReinitializeJSProxy(Handle<JSProxy> proxy, InstanceType type, int size);
+  void SetStrictFunctionInstanceDescriptor(Handle<Map> map,
+                                           FunctionMode function_mode);
 };
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_FACTORY_H_

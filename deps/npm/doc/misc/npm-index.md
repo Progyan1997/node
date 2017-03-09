@@ -65,6 +65,10 @@ Modify package distribution tags
 
 Docs for a package in a web browser maybe
 
+### npm-doctor(1)
+
+Check your environments
+
 ### npm-edit(1)
 
 Edit an installed package
@@ -84,6 +88,10 @@ Get help on npm
 ### npm-init(1)
 
 Interactively create a package.json file
+
+### npm-install-test(1)
+
+Install package(s) and run tests
 
 ### npm-install(1)
 
@@ -173,10 +181,6 @@ Start a package
 
 Stop a package
 
-### npm-tag(1)
-
-Tag a published version
-
 ### npm-team(1)
 
 Manage organization teams and team memberships
@@ -248,10 +252,6 @@ Developer Guide
 ### npm-disputes(7)
 
 Handling Module Name Disputes
-
-### npm-faq(7)
-
-Frequently Asked Questions
 
 ### npm-index(7)
 

@@ -1,6 +1,8 @@
 #ifndef SRC_NODE_CRYPTO_BIO_H_
 #define SRC_NODE_CRYPTO_BIO_H_
 
+#if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
+
 #include "openssl/bio.h"
 #include "env.h"
 #include "env-inl.h"
@@ -22,6 +24,10 @@ class NodeBIO {
   ~NodeBIO();
 
   static BIO* New();
+
+  // NewFixed takes a copy of `len` bytes from `data` and returns a BIO that,
+  // when read from, returns those bytes followed by EOF.
+  static BIO* NewFixed(const char* data, size_t len);
 
   void AssignEnvironment(Environment* env);
 
@@ -85,7 +91,8 @@ class NodeBIO {
   static int Write(BIO* bio, const char* data, int len);
   static int Puts(BIO* bio, const char* str);
   static int Gets(BIO* bio, char* out, int size);
-  static long Ctrl(BIO* bio, int cmd, long num, void* ptr);
+  static long Ctrl(BIO* bio, int cmd, long num,  // NOLINT(runtime/int)
+                   void* ptr);
 
   // Enough to handle the most of the client hellos
   static const size_t kInitialBufferLength = 1024;
@@ -129,5 +136,7 @@ class NodeBIO {
 };
 
 }  // namespace node
+
+#endif  // defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
 #endif  // SRC_NODE_CRYPTO_BIO_H_

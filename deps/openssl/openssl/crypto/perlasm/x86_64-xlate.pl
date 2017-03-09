@@ -195,14 +195,17 @@ my %globals;
     sub out {
     	my $self = shift;
 
+	$self->{value} =~ s/\b(0b[0-1]+)/oct($1)/eig;
 	if ($gas) {
 	    # Solaris /usr/ccs/bin/as can't handle multiplications
 	    # in $self->{value}
-	    $self->{value} =~ s/(?<![\w\$\.])(0x?[0-9a-f]+)/oct($1)/egi;
-	    $self->{value} =~ s/([0-9]+\s*[\*\/\%]\s*[0-9]+)/eval($1)/eg;
+	    my $value = $self->{value};
+	    $value =~ s/(?<![\w\$\.])(0x?[0-9a-f]+)/oct($1)/egi;
+	    if ($value =~ s/([0-9]+\s*[\*\/\%]\s*[0-9]+)/eval($1)/eg) {
+		$self->{value} = $value;
+	    }
 	    sprintf "\$%s",$self->{value};
 	} else {
-	    $self->{value} =~ s/(0b[0-1]+)/oct($1)/eig;
 	    $self->{value} =~ s/0x([0-9a-f]+)/0$1h/ig if ($masm);
 	    sprintf "%s",$self->{value};
 	}
@@ -247,11 +250,18 @@ my %globals;
 	$self->{base}  =~ s/^[er](.?[0-9xpi])[d]?$/r\1/;
 
 	# Solaris /usr/ccs/bin/as can't handle multiplications
-	# in $self->{label}, new gas requires sign extension...
+	# in $self->{label}...
 	use integer;
 	$self->{label} =~ s/(?<![\w\$\.])(0x?[0-9a-f]+)/oct($1)/egi;
 	$self->{label} =~ s/\b([0-9]+\s*[\*\/\%]\s*[0-9]+)\b/eval($1)/eg;
-	$self->{label} =~ s/\b([0-9]+)\b/$1<<32>>32/eg;
+
+	# Some assemblers insist on signed presentation of 32-bit
+	# offsets, but sign extension is a tricky business in perl...
+	if ((1<<31)<<1) {
+	    $self->{label} =~ s/\b([0-9]+)\b/$1<<32>>32/eg;
+	} else {
+	    $self->{label} =~ s/\b([0-9]+)\b/$1>>0/eg;
+	}
 
 	if (!$self->{label} && $self->{index} && $self->{scale}==1 &&
 	    $self->{base} =~ /(rbp|r13)/) {

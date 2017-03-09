@@ -9,10 +9,12 @@
 #include <sstream>
 #include <string>
 
+#include "src/base/base-export.h"
 #include "src/base/build_config.h"
+#include "src/base/compiler-specific.h"
 
-extern "C" void V8_Fatal(const char* file, int line, const char* format, ...);
-
+extern "C" PRINTF_FORMAT(3, 4) V8_NORETURN V8_BASE_EXPORT
+    void V8_Fatal(const char* file, int line, const char* format, ...);
 
 // The FATAL, UNREACHABLE and UNIMPLEMENTED macros are useful during
 // development, but they should not be relied on in the final product.
@@ -28,7 +30,7 @@ extern "C" void V8_Fatal(const char* file, int line, const char* format, ...);
   V8_Fatal("", 0, "%s", (msg))
 #define UNIMPLEMENTED()                         \
   V8_Fatal("", 0, "unimplemented code")
-#define UNREACHABLE() ((void) 0)
+#define UNREACHABLE() V8_Fatal("", 0, "unreachable code")
 #endif
 
 
@@ -86,8 +88,8 @@ std::string* MakeCheckOpString(Lhs const& lhs, Rhs const& rhs,
 
 // Commonly used instantiations of MakeCheckOpString<>. Explicitly instantiated
 // in logging.cc.
-#define DEFINE_MAKE_CHECK_OP_STRING(type)                     \
-  extern template std::string* MakeCheckOpString<type, type>( \
+#define DEFINE_MAKE_CHECK_OP_STRING(type)                                    \
+  extern template V8_BASE_EXPORT std::string* MakeCheckOpString<type, type>( \
       type const&, type const&, char const*);
 DEFINE_MAKE_CHECK_OP_STRING(int)
 DEFINE_MAKE_CHECK_OP_STRING(long)       // NOLINT(runtime/int)
@@ -116,10 +118,11 @@ DEFINE_MAKE_CHECK_OP_STRING(void const*)
                                            char const* msg) {                  \
     return V8_LIKELY(lhs op rhs) ? nullptr : MakeCheckOpString(lhs, rhs, msg); \
   }                                                                            \
-  extern template std::string* Check##NAME##Impl<float, float>(                \
+  extern template V8_BASE_EXPORT std::string* Check##NAME##Impl<float, float>( \
       float const& lhs, float const& rhs, char const* msg);                    \
-  extern template std::string* Check##NAME##Impl<double, double>(              \
-      double const& lhs, double const& rhs, char const* msg);
+  extern template V8_BASE_EXPORT std::string*                                  \
+      Check##NAME##Impl<double, double>(double const& lhs, double const& rhs,  \
+                                        char const* msg);
 DEFINE_CHECK_OP_IMPL(EQ, ==)
 DEFINE_CHECK_OP_IMPL(NE, !=)
 DEFINE_CHECK_OP_IMPL(LE, <=)
@@ -153,6 +156,7 @@ void DumpBacktrace();
 #define DCHECK(condition)      CHECK(condition)
 #define DCHECK_EQ(v1, v2)      CHECK_EQ(v1, v2)
 #define DCHECK_NE(v1, v2)      CHECK_NE(v1, v2)
+#define DCHECK_GT(v1, v2)      CHECK_GT(v1, v2)
 #define DCHECK_GE(v1, v2)      CHECK_GE(v1, v2)
 #define DCHECK_LT(v1, v2)      CHECK_LT(v1, v2)
 #define DCHECK_LE(v1, v2)      CHECK_LE(v1, v2)
@@ -163,6 +167,7 @@ void DumpBacktrace();
 #define DCHECK(condition)      ((void) 0)
 #define DCHECK_EQ(v1, v2)      ((void) 0)
 #define DCHECK_NE(v1, v2)      ((void) 0)
+#define DCHECK_GT(v1, v2)      ((void) 0)
 #define DCHECK_GE(v1, v2)      ((void) 0)
 #define DCHECK_LT(v1, v2)      ((void) 0)
 #define DCHECK_LE(v1, v2)      ((void) 0)

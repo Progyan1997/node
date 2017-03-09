@@ -275,7 +275,7 @@ assertEquals('/(?:)/', re.toString());
 re.compile();
 assertEquals('/(?:)/', re.toString());
 re.compile(void 0);
-assertEquals('/undefined/', re.toString());
+assertEquals('/(?:)/', re.toString());
 
 
 // Check for lazy RegExp literal creation
@@ -564,21 +564,21 @@ log = [];
 re.lastIndex = fakeLastIndex;
 var result = re.exec(fakeString);
 assertEquals(["str"], result);
-assertEquals(["ts", "li"], log);
+assertEquals(["ts"], log);
 
 // Again, to check if caching interferes.
 log = [];
 re.lastIndex = fakeLastIndex;
 result = re.exec(fakeString);
 assertEquals(["str"], result);
-assertEquals(["ts", "li"], log);
+assertEquals(["ts"], log);
 
 // And one more time, just to be certain.
 log = [];
 re.lastIndex = fakeLastIndex;
 result = re.exec(fakeString);
 assertEquals(["str"], result);
-assertEquals(["ts", "li"], log);
+assertEquals(["ts"], log);
 
 // Now with a global regexp, where lastIndex is actually used.
 re = /str/g;
@@ -605,23 +605,29 @@ assertEquals(["ts", "li"], log);
 
 // Check that properties of RegExp have the correct permissions.
 var re = /x/g;
-var desc = Object.getOwnPropertyDescriptor(re, "global");
-assertEquals(true, desc.value);
-assertEquals(false, desc.configurable);
+var desc = Object.getOwnPropertyDescriptor(re.__proto__, "global");
+assertInstanceof(desc.get, Function);
+assertEquals(true, desc.configurable);
 assertEquals(false, desc.enumerable);
-assertEquals(false, desc.writable);
+
+desc = Object.getOwnPropertyDescriptor(re.__proto__, "multiline");
+assertInstanceof(desc.get, Function);
+assertEquals(true, desc.configurable);
+assertEquals(false, desc.enumerable);
+
+desc = Object.getOwnPropertyDescriptor(re.__proto__, "ignoreCase");
+assertInstanceof(desc.get, Function);
+assertEquals(true, desc.configurable);
+assertEquals(false, desc.enumerable);
+
+desc = Object.getOwnPropertyDescriptor(re, "global");
+assertEquals(undefined, desc);
 
 desc = Object.getOwnPropertyDescriptor(re, "multiline");
-assertEquals(false, desc.value);
-assertEquals(false, desc.configurable);
-assertEquals(false, desc.enumerable);
-assertEquals(false, desc.writable);
+assertEquals(undefined, desc);
 
 desc = Object.getOwnPropertyDescriptor(re, "ignoreCase");
-assertEquals(false, desc.value);
-assertEquals(false, desc.configurable);
-assertEquals(false, desc.enumerable);
-assertEquals(false, desc.writable);
+assertEquals(undefined, desc);
 
 desc = Object.getOwnPropertyDescriptor(re, "lastIndex");
 assertEquals(0, desc.value);
@@ -713,6 +719,48 @@ assertThrows("RegExp.prototype.toString.call(0)", TypeError);
 assertThrows("RegExp.prototype.toString.call('')", TypeError);
 assertThrows("RegExp.prototype.toString.call(false)", TypeError);
 assertThrows("RegExp.prototype.toString.call(true)", TypeError);
-assertThrows("RegExp.prototype.toString.call([])", TypeError);
-assertThrows("RegExp.prototype.toString.call({})", TypeError);
-assertThrows("RegExp.prototype.toString.call(function(){})", TypeError);
+
+// Test mutually recursive capture and backreferences.
+assertEquals(["b", "", ""], /(\2)b(\1)/.exec("aba"));
+assertEquals(["a", "", ""], /(\2).(\1)/.exec("aba"));
+assertEquals(["aba", "a", "a"], /(.\2).(\1)/.exec("aba"));
+assertEquals(["acbc", "c", "c"], /a(.\2)b(\1)$/.exec("acbc"));
+assertEquals(["acbc", "c", "c"], /a(.\2)b(\1)/.exec("aabcacbc"));
+
+// Test surrogate pair detection in split.
+// \u{daff}\u{e000} is not a surrogate pair, while \u{daff}\u{dfff} is.
+assertEquals(["\u{daff}", "\u{e000}"], "\u{daff}\u{e000}".split(/[a-z]{0,1}/u));
+assertEquals(["\u{daff}\u{dfff}"], "\u{daff}\u{dfff}".split(/[a-z]{0,1}/u));
+
+// Test that changing a property on RegExp.prototype results in us taking the
+// slow path, which executes RegExp.prototype.exec instead of our
+// RegExpExecStub.
+const RegExpPrototypeExec = RegExp.prototype.exec;
+RegExp.prototype.exec = function() { throw new Error(); }
+assertThrows(() => "abc".replace(/./, ""));
+RegExp.prototype.exec = RegExpPrototypeExec;
+
+// Test the code path in RE.proto[@@search] when previousLastIndex is a receiver
+// but can't be converted to a primitive. This exposed a crash in an older
+// C++ implementation of @@search which a) still relied on Object::Equals,
+// and b) incorrectly returned isolate->pending_exception() on error.
+
+var re = /./;
+re.lastIndex = { [Symbol.toPrimitive]: 42 };
+try { "abc".search(re); } catch (_) {}  // Ensure we don't crash.
+
+// Test lastIndex values of -0.0 and NaN (since @@search uses SameValue).
+
+var re = /./;
+re.exec = function(str) { assertEquals(0, re.lastIndex); return []; }
+re.lastIndex = -0.0;
+assertEquals(-0, re.lastIndex);
+"abc".search(re);
+assertEquals(-0, re.lastIndex);
+
+var re = /./;
+re.exec = function(str) { assertEquals(0, re.lastIndex); return []; }
+re.lastIndex = NaN;
+assertEquals(NaN, re.lastIndex);
+"abc".search(re);
+assertEquals(NaN, re.lastIndex);

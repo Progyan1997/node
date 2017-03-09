@@ -1,24 +1,25 @@
 'use strict';
-var common = require('../common');
-var assert = require('assert');
+const common = require('../common');
+const assert = require('assert');
 
-var spawn = require('child_process').spawn;
+const spawn = require('child_process').spawn;
 
-var env = {
+const env = {
   'HELLO': 'WORLD'
 };
-env.__proto__ = {
+Object.setPrototypeOf(env, {
   'FOO': 'BAR'
-};
+});
 
+let child;
 if (common.isWindows) {
-  var child = spawn('cmd.exe', ['/c', 'set'], {env: env});
+  child = spawn('cmd.exe', ['/c', 'set'], {env: env});
 } else {
-  var child = spawn('/usr/bin/env', [], {env: env});
+  child = spawn('/usr/bin/env', [], {env: env});
 }
 
 
-var response = '';
+let response = '';
 
 child.stdout.setEncoding('utf8');
 

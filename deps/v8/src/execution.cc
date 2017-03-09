@@ -6,9 +6,10 @@
 
 #include "src/bootstrapper.h"
 #include "src/codegen.h"
-#include "src/deoptimizer.h"
+#include "src/compiler-dispatcher/optimizing-compile-dispatcher.h"
 #include "src/isolate-inl.h"
 #include "src/messages.h"
+#include "src/runtime-profiler.h"
 #include "src/vm-state-inl.h"
 
 namespace v8 {
@@ -58,7 +59,44 @@ MUST_USE_RESULT MaybeHandle<Object> Invoke(Isolate* isolate, bool is_construct,
                                            Handle<Object> receiver, int argc,
                                            Handle<Object> args[],
                                            Handle<Object> new_target) {
-  DCHECK(!receiver->IsGlobalObject());
+  DCHECK(!receiver->IsJSGlobalObject());
+
+#ifdef USE_SIMULATOR
+  // Simulators use separate stacks for C++ and JS. JS stack overflow checks
+  // are performed whenever a JS function is called. However, it can be the case
+  // that the C++ stack grows faster than the JS stack, resulting in an overflow
+  // there. Add a check here to make that less likely.
+  StackLimitCheck check(isolate);
+  if (check.HasOverflowed()) {
+    isolate->StackOverflow();
+    isolate->ReportPendingMessages();
+    return MaybeHandle<Object>();
+  }
+#endif
+
+  // api callbacks can be called directly.
+  if (target->IsJSFunction()) {
+    Handle<JSFunction> function = Handle<JSFunction>::cast(target);
+    if ((!is_construct || function->IsConstructor()) &&
+        function->shared()->IsApiFunction()) {
+      SaveContext save(isolate);
+      isolate->set_context(function->context());
+      DCHECK(function->context()->global_object()->IsJSGlobalObject());
+      if (is_construct) receiver = isolate->factory()->the_hole_value();
+      auto value = Builtins::InvokeApiFunction(
+          isolate, is_construct, function, receiver, argc, args,
+          Handle<HeapObject>::cast(new_target));
+      bool has_exception = value.is_null();
+      DCHECK(has_exception == isolate->has_pending_exception());
+      if (has_exception) {
+        isolate->ReportPendingMessages();
+        return MaybeHandle<Object>();
+      } else {
+        isolate->clear_pending_message();
+      }
+      return value;
+    }
+  }
 
   // Entering JavaScript.
   VMState<JS> state(isolate);
@@ -87,6 +125,8 @@ MUST_USE_RESULT MaybeHandle<Object> Invoke(Isolate* isolate, bool is_construct,
     SealHandleScope shs(isolate);
     JSEntryFunction stub_entry = FUNCTION_CAST<JSEntryFunction>(code->entry());
 
+    if (FLAG_clear_exceptions_on_js_entry) isolate->clear_pending_exception();
+
     // Call the function through the right JS entry stub.
     Object* orig_func = *new_target;
     Object* func = *target;
@@ -95,7 +135,9 @@ MUST_USE_RESULT MaybeHandle<Object> Invoke(Isolate* isolate, bool is_construct,
     if (FLAG_profile_deserialization && target->IsJSFunction()) {
       PrintDeserializedCodeInfo(Handle<JSFunction>::cast(target));
     }
-    value = CALL_GENERATED_CODE(stub_entry, orig_func, func, recv, argc, argv);
+    RuntimeCallTimerScope timer(isolate, &RuntimeCallStats::JS_Execution);
+    value = CALL_GENERATED_CODE(isolate, stub_entry, orig_func, func, recv,
+                                argc, argv);
   }
 
 #ifdef VERIFY_HEAP
@@ -105,14 +147,10 @@ MUST_USE_RESULT MaybeHandle<Object> Invoke(Isolate* isolate, bool is_construct,
 #endif
 
   // Update the pending exception flag and return the value.
-  bool has_exception = value->IsException();
+  bool has_exception = value->IsException(isolate);
   DCHECK(has_exception == isolate->has_pending_exception());
   if (has_exception) {
     isolate->ReportPendingMessages();
-    // Reset stepping state when script exits with uncaught exception.
-    if (isolate->debug()->is_active()) {
-      isolate->debug()->ClearStepping();
-    }
     return MaybeHandle<Object>();
   } else {
     isolate->clear_pending_message();
@@ -131,38 +169,9 @@ MaybeHandle<Object> Execution::Call(Isolate* isolate, Handle<Object> callable,
   // Convert calls on global objects to be calls on the global
   // receiver instead to avoid having a 'this' pointer which refers
   // directly to a global object.
-  if (receiver->IsGlobalObject()) {
+  if (receiver->IsJSGlobalObject()) {
     receiver =
-        handle(Handle<GlobalObject>::cast(receiver)->global_proxy(), isolate);
-  }
-
-  // api callbacks can be called directly.
-  if (callable->IsJSFunction() &&
-      Handle<JSFunction>::cast(callable)->shared()->IsApiFunction()) {
-    Handle<JSFunction> function = Handle<JSFunction>::cast(callable);
-    SaveContext save(isolate);
-    isolate->set_context(function->context());
-    // Do proper receiver conversion for non-strict mode api functions.
-    if (!receiver->IsJSReceiver() &&
-        is_sloppy(function->shared()->language_mode())) {
-      if (receiver->IsUndefined() || receiver->IsNull()) {
-        receiver = handle(function->global_proxy(), isolate);
-      } else {
-        ASSIGN_RETURN_ON_EXCEPTION(
-            isolate, receiver, Execution::ToObject(isolate, receiver), Object);
-      }
-    }
-    DCHECK(function->context()->global_object()->IsGlobalObject());
-    auto value = Builtins::InvokeApiFunction(function, receiver, argc, argv);
-    bool has_exception = value.is_null();
-    DCHECK(has_exception == isolate->has_pending_exception());
-    if (has_exception) {
-      isolate->ReportPendingMessages();
-      return MaybeHandle<Object>();
-    } else {
-      isolate->clear_pending_message();
-    }
-    return value;
+        handle(Handle<JSGlobalObject>::cast(receiver)->global_proxy(), isolate);
   }
   return Invoke(isolate, false, callable, receiver, argc, argv,
                 isolate->factory()->undefined_value());
@@ -185,12 +194,12 @@ MaybeHandle<Object> Execution::New(Isolate* isolate, Handle<Object> constructor,
 }
 
 
-MaybeHandle<Object> Execution::TryCall(Handle<JSFunction> func,
+MaybeHandle<Object> Execution::TryCall(Isolate* isolate,
+                                       Handle<Object> callable,
                                        Handle<Object> receiver, int argc,
                                        Handle<Object> args[],
                                        MaybeHandle<Object>* exception_out) {
   bool is_termination = false;
-  Isolate* isolate = func->GetIsolate();
   MaybeHandle<Object> maybe_result;
   if (exception_out != NULL) *exception_out = MaybeHandle<Object>();
   // Enter a try-block while executing the JavaScript code. To avoid
@@ -202,7 +211,7 @@ MaybeHandle<Object> Execution::TryCall(Handle<JSFunction> func,
     catcher.SetVerbose(false);
     catcher.SetCaptureMessage(false);
 
-    maybe_result = Call(isolate, func, receiver, argc, args);
+    maybe_result = Call(isolate, callable, receiver, argc, args);
 
     if (maybe_result.is_null()) {
       DCHECK(catcher.HasCaught());
@@ -424,70 +433,6 @@ void StackGuard::InitThread(const ExecutionAccess& lock) {
 
 // --- C a l l s   t o   n a t i v e s ---
 
-#define RETURN_NATIVE_CALL(name, args)                                         \
-  do {                                                                         \
-    Handle<Object> argv[] = args;                                              \
-    return Call(isolate, isolate->name##_fun(),                                \
-                isolate->factory()->undefined_value(), arraysize(argv), argv); \
-  } while (false)
-
-
-MaybeHandle<Object> Execution::ToDetailString(
-    Isolate* isolate, Handle<Object> obj) {
-  RETURN_NATIVE_CALL(to_detail_string, { obj });
-}
-
-
-MaybeHandle<Object> Execution::NewDate(Isolate* isolate, double time) {
-  Handle<Object> time_obj = isolate->factory()->NewNumber(time);
-  RETURN_NATIVE_CALL(create_date, { time_obj });
-}
-
-
-#undef RETURN_NATIVE_CALL
-
-
-MaybeHandle<Object> Execution::ToObject(Isolate* isolate, Handle<Object> obj) {
-  Handle<JSReceiver> receiver;
-  if (JSReceiver::ToObject(isolate, obj).ToHandle(&receiver)) {
-    return receiver;
-  }
-  THROW_NEW_ERROR(
-      isolate, NewTypeError(MessageTemplate::kUndefinedOrNullToObject), Object);
-}
-
-
-MaybeHandle<JSRegExp> Execution::NewJSRegExp(Handle<String> pattern,
-                                             Handle<String> flags) {
-  Isolate* isolate = pattern->GetIsolate();
-  Handle<JSFunction> function = Handle<JSFunction>(
-      isolate->native_context()->regexp_function());
-  Handle<Object> re_obj;
-  ASSIGN_RETURN_ON_EXCEPTION(
-      isolate, re_obj,
-      RegExpImpl::CreateRegExpLiteral(function, pattern, flags),
-      JSRegExp);
-  return Handle<JSRegExp>::cast(re_obj);
-}
-
-
-Handle<String> Execution::GetStackTraceLine(Handle<Object> recv,
-                                            Handle<JSFunction> fun,
-                                            Handle<Object> pos,
-                                            Handle<Object> is_global) {
-  Isolate* isolate = fun->GetIsolate();
-  Handle<Object> args[] = { recv, fun, pos, is_global };
-  MaybeHandle<Object> maybe_result =
-      TryCall(isolate->get_stack_trace_line_fun(),
-              isolate->factory()->undefined_value(), arraysize(args), args);
-  Handle<Object> result;
-  if (!maybe_result.ToHandle(&result) || !result->IsString()) {
-    return isolate->factory()->empty_string();
-  }
-
-  return Handle<String>::cast(result);
-}
-
 
 void StackGuard::HandleGCInterrupt() {
   if (CheckAndClearInterrupt(GC_REQUEST)) {
@@ -497,6 +442,11 @@ void StackGuard::HandleGCInterrupt() {
 
 
 Object* StackGuard::HandleInterrupts() {
+  if (FLAG_verify_predictable) {
+    // Advance synthetic time by making a time request.
+    isolate_->heap()->MonotonicallyIncreasingTimeInMs();
+  }
+
   if (CheckAndClearInterrupt(GC_REQUEST)) {
     isolate_->heap()->HandleGCRequest();
   }
@@ -525,7 +475,7 @@ Object* StackGuard::HandleInterrupts() {
 
   isolate_->counters()->stack_interrupts()->Increment();
   isolate_->counters()->runtime_profiler_ticks()->Increment();
-  isolate_->runtime_profiler()->OptimizeNow();
+  isolate_->runtime_profiler()->MarkCandidatesForOptimization();
 
   return isolate_->heap()->undefined_value();
 }

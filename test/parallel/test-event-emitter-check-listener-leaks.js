@@ -1,21 +1,29 @@
 'use strict';
 require('../common');
-var assert = require('assert');
-var events = require('events');
+const assert = require('assert');
+const events = require('events');
 
-var e = new events.EventEmitter();
+let e = new events.EventEmitter();
 
 // default
-for (var i = 0; i < 10; i++) {
+for (let i = 0; i < 10; i++) {
   e.on('default', function() {});
 }
 assert.ok(!e._events['default'].hasOwnProperty('warned'));
 e.on('default', function() {});
 assert.ok(e._events['default'].warned);
 
+// symbol
+const symbol = Symbol('symbol');
+e.setMaxListeners(1);
+e.on(symbol, function() {});
+assert.ok(!e._events[symbol].hasOwnProperty('warned'));
+e.on(symbol, function() {});
+assert.ok(e._events[symbol].hasOwnProperty('warned'));
+
 // specific
 e.setMaxListeners(5);
-for (var i = 0; i < 5; i++) {
+for (let i = 0; i < 5; i++) {
   e.on('specific', function() {});
 }
 assert.ok(!e._events['specific'].hasOwnProperty('warned'));
@@ -31,7 +39,7 @@ assert.ok(e._events['only one'].hasOwnProperty('warned'));
 
 // unlimited
 e.setMaxListeners(0);
-for (var i = 0; i < 1000; i++) {
+for (let i = 0; i < 1000; i++) {
   e.on('unlimited', function() {});
 }
 assert.ok(!e._events['unlimited'].hasOwnProperty('warned'));
@@ -40,7 +48,7 @@ assert.ok(!e._events['unlimited'].hasOwnProperty('warned'));
 events.EventEmitter.defaultMaxListeners = 42;
 e = new events.EventEmitter();
 
-for (var i = 0; i < 42; ++i) {
+for (let i = 0; i < 42; ++i) {
   e.on('fortytwo', function() {});
 }
 assert.ok(!e._events['fortytwo'].hasOwnProperty('warned'));

@@ -5,7 +5,8 @@
 #ifndef V8_COMPILER_AST_GRAPH_BUILDER_H_
 #define V8_COMPILER_AST_GRAPH_BUILDER_H_
 
-#include "src/ast.h"
+#include "src/ast/ast.h"
+#include "src/compiler/compiler-source-position-table.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/liveness-analyzer.h"
 #include "src/compiler/state-values-utils.h"
@@ -13,26 +14,34 @@
 namespace v8 {
 namespace internal {
 
+// Forward declarations.
 class BitVector;
+class CompilationInfo;
 
 namespace compiler {
 
+// Forward declarations.
 class ControlBuilder;
 class Graph;
-class JSTypeFeedbackTable;
 class LoopAssignmentAnalysis;
 class LoopBuilder;
 class Node;
+class TypeHintAnalysis;
+
 
 // The AstGraphBuilder produces a high-level IR graph, based on an
 // underlying AST. The produced graph can either be compiled into a
 // stand-alone function or be wired into another graph for the purposes
 // of function inlining.
-class AstGraphBuilder : public AstVisitor {
+// This AstVistor is not final, and provides the AstVisitor methods as virtual
+// methods so they can be specialized by subclasses.
+class AstGraphBuilder : public AstVisitor<AstGraphBuilder> {
  public:
   AstGraphBuilder(Zone* local_zone, CompilationInfo* info, JSGraph* jsgraph,
-                  LoopAssignmentAnalysis* loop_assignment = NULL,
-                  JSTypeFeedbackTable* js_type_feedback = NULL);
+                  float invocation_frequency,
+                  LoopAssignmentAnalysis* loop_assignment = nullptr,
+                  TypeHintAnalysis* type_hint_analysis = nullptr);
+  virtual ~AstGraphBuilder() {}
 
   // Creates a graph by visiting the entire AST.
   bool CreateGraph(bool stack_check = true);
@@ -47,13 +56,13 @@ class AstGraphBuilder : public AstVisitor {
   }
 
  protected:
-#define DECLARE_VISIT(type) void Visit##type(type* node) override;
+#define DECLARE_VISIT(type) virtual void Visit##type(type* node);
   // Visiting functions for AST nodes make this an AstVisitor.
   AST_NODE_LIST(DECLARE_VISIT)
 #undef DECLARE_VISIT
 
   // Visiting function for declarations list is overridden.
-  void VisitDeclarations(ZoneList<Declaration*>* declarations) override;
+  void VisitDeclarations(Declaration::List* declarations);
 
  private:
   class AstContext;
@@ -67,12 +76,13 @@ class AstGraphBuilder : public AstVisitor {
   class ControlScopeForCatch;
   class ControlScopeForFinally;
   class Environment;
-  class FrameStateBeforeAndAfter;
   friend class ControlBuilder;
 
+  Isolate* isolate_;
   Zone* local_zone_;
   CompilationInfo* info_;
   JSGraph* jsgraph_;
+  float const invocation_frequency_;
   Environment* environment_;
   AstContext* ast_context_;
 
@@ -88,9 +98,9 @@ class AstGraphBuilder : public AstVisitor {
   // Nodes representing values in the activation record.
   SetOncePointer<Node> function_closure_;
   SetOncePointer<Node> function_context_;
+  SetOncePointer<Node> new_target_;
 
   // Tracks how many try-blocks are currently entered.
-  int try_catch_nesting_level_;
   int try_nesting_level_;
 
   // Temporary storage for building node input lists.
@@ -100,11 +110,17 @@ class AstGraphBuilder : public AstVisitor {
   // Optimization to cache loaded feedback vector.
   SetOncePointer<Node> feedback_vector_;
 
+  // Optimization to cache empty frame state.
+  SetOncePointer<Node> empty_frame_state_;
+
   // Control nodes that exit the function body.
   ZoneVector<Node*> exit_controls_;
 
   // Result of loop assignment analysis performed before graph creation.
   LoopAssignmentAnalysis* loop_assignment_analysis_;
+
+  // Result of type hint analysis performed before graph creation.
+  TypeHintAnalysis* type_hint_analysis_;
 
   // Cache for StateValues nodes for frame states.
   StateValuesCache state_values_cache_;
@@ -114,9 +130,6 @@ class AstGraphBuilder : public AstVisitor {
 
   // Function info for frame state construction.
   const FrameStateFunctionInfo* const frame_state_function_info_;
-
-  // Type feedback table.
-  JSTypeFeedbackTable* js_type_feedback_;
 
   // Growth increment for the temporary buffer used to construct input lists to
   // new nodes.
@@ -129,6 +142,7 @@ class AstGraphBuilder : public AstVisitor {
   ContextScope* execution_context() const { return execution_context_; }
   CommonOperatorBuilder* common() const { return jsgraph_->common(); }
   CompilationInfo* info() const { return info_; }
+  Isolate* isolate() const { return isolate_; }
   LanguageMode language_mode() const;
   JSGraph* jsgraph() { return jsgraph_; }
   Graph* graph() { return jsgraph_->graph(); }
@@ -150,16 +164,22 @@ class AstGraphBuilder : public AstVisitor {
   // Create the main graph body by visiting the AST.
   void CreateGraphBody(bool stack_check);
 
-  // Get or create the node that represents the outer function closure.
+  // Get or create the node that represents the incoming function closure.
   Node* GetFunctionClosureForContext();
   Node* GetFunctionClosure();
 
-  // Get or create the node that represents the outer function context.
+  // Get or create the node that represents the incoming function context.
   Node* GetFunctionContext();
+
+  // Get or create the node that represents the incoming new target value.
+  Node* GetNewTarget();
+
+  // Get or create the node that represents the empty frame state.
+  Node* GetEmptyFrameState();
 
   // Node creation helpers.
   Node* NewNode(const Operator* op, bool incomplete = false) {
-    return MakeNode(op, 0, static_cast<Node**>(NULL), incomplete);
+    return MakeNode(op, 0, static_cast<Node**>(nullptr), incomplete);
   }
 
   Node* NewNode(const Operator* op, Node* n1) {
@@ -215,10 +235,17 @@ class AstGraphBuilder : public AstVisitor {
   // Helper to indicate a node exits the function body.
   void UpdateControlDependencyToLeaveFunction(Node* exit);
 
-  // Builds deoptimization for a given node.
+  // Prepare information for lazy deoptimization. This information is attached
+  // to the given node and the output value produced by the node is combined.
+  // Conceptually this frame state is "after" a given operation.
   void PrepareFrameState(Node* node, BailoutId ast_id,
                          OutputFrameStateCombine framestate_combine =
                              OutputFrameStateCombine::Ignore());
+
+  // Prepare information for eager deoptimization. This information is carried
+  // by dedicated {Checkpoint} nodes that are wired into the effect chain.
+  // Conceptually this frame state is "before" a given operation.
+  void PrepareEagerCheckpoint(BailoutId ast_id);
 
   BitVector* GetVariablesAssignedInLoop(IterationStatement* stmt);
 
@@ -233,28 +260,32 @@ class AstGraphBuilder : public AstVisitor {
   Node** EnsureInputBufferSize(int size);
 
   // Named and keyed loads require a VectorSlotPair for successful lowering.
-  VectorSlotPair CreateVectorSlotPair(FeedbackVectorICSlot slot) const;
+  VectorSlotPair CreateVectorSlotPair(FeedbackVectorSlot slot) const;
 
   // Determine which contexts need to be checked for extension objects that
   // might shadow the optimistic declaration of dynamic lookup variables.
   uint32_t ComputeBitsetForDynamicGlobal(Variable* variable);
   uint32_t ComputeBitsetForDynamicContext(Variable* variable);
 
+  // Computes the frequency for JSCallFunction and JSCallConstruct nodes.
+  float ComputeCallFrequency(FeedbackVectorSlot slot) const;
+
   // ===========================================================================
   // The following build methods all generate graph fragments and return one
   // resulting node. The operand stack height remains the same, variables and
   // other dependencies tracked by the environment might be mutated though.
 
-  // Builder to create a receiver check for sloppy mode.
-  Node* BuildPatchReceiverToGlobalProxy(Node* receiver);
-
   // Builders to create local function, script and block contexts.
-  Node* BuildLocalFunctionContext(Node* context);
+  Node* BuildLocalActivationContext(Node* context);
+  Node* BuildLocalFunctionContext(Scope* scope);
   Node* BuildLocalScriptContext(Scope* scope);
   Node* BuildLocalBlockContext(Scope* scope);
 
   // Builder to create an arguments object if it is used.
   Node* BuildArgumentsObject(Variable* arguments);
+
+  // Builder to create an array of rest parameters if used.
+  Node* BuildRestArgumentsArray(Variable* rest);
 
   // Builder that assigns to the {.this_function} internal variable if needed.
   Node* BuildThisFunctionVariable(Variable* this_function_var);
@@ -266,13 +297,11 @@ class AstGraphBuilder : public AstVisitor {
   Node* BuildVariableAssignment(Variable* variable, Node* value,
                                 Token::Value op, const VectorSlotPair& slot,
                                 BailoutId bailout_id,
-                                FrameStateBeforeAndAfter& states,
                                 OutputFrameStateCombine framestate_combine =
                                     OutputFrameStateCombine::Ignore());
   Node* BuildVariableDelete(Variable* variable, BailoutId bailout_id,
                             OutputFrameStateCombine framestate_combine);
   Node* BuildVariableLoad(Variable* variable, BailoutId bailout_id,
-                          FrameStateBeforeAndAfter& states,
                           const VectorSlotPair& feedback,
                           OutputFrameStateCombine framestate_combine,
                           TypeofMode typeof_mode = NOT_INSIDE_TYPEOF);
@@ -283,52 +312,43 @@ class AstGraphBuilder : public AstVisitor {
   Node* BuildNamedLoad(Node* receiver, Handle<Name> name,
                        const VectorSlotPair& feedback);
   Node* BuildKeyedStore(Node* receiver, Node* key, Node* value,
-                        const VectorSlotPair& feedback, TypeFeedbackId id);
+                        const VectorSlotPair& feedback);
   Node* BuildNamedStore(Node* receiver, Handle<Name> name, Node* value,
-                        const VectorSlotPair& feedback, TypeFeedbackId id);
+                        const VectorSlotPair& feedback);
 
   // Builders for super property loads and stores.
   Node* BuildKeyedSuperStore(Node* receiver, Node* home_object, Node* key,
-                             Node* value, TypeFeedbackId id);
+                             Node* value);
   Node* BuildNamedSuperStore(Node* receiver, Node* home_object,
-                             Handle<Name> name, Node* value, TypeFeedbackId id);
+                             Handle<Name> name, Node* value);
   Node* BuildNamedSuperLoad(Node* receiver, Node* home_object,
                             Handle<Name> name, const VectorSlotPair& feedback);
   Node* BuildKeyedSuperLoad(Node* receiver, Node* home_object, Node* key,
                             const VectorSlotPair& feedback);
 
   // Builders for global variable loads and stores.
-  Node* BuildGlobalLoad(Node* script_context, Node* global, Handle<Name> name,
-                        const VectorSlotPair& feedback, TypeofMode typeof_mode,
-                        int slot_index);
-  Node* BuildGlobalStore(Node* script_context, Node* global, Handle<Name> name,
-                         Node* value, const VectorSlotPair& feedback,
-                         TypeFeedbackId id, int slot_index);
+  Node* BuildGlobalLoad(Handle<Name> name, const VectorSlotPair& feedback,
+                        TypeofMode typeof_mode);
+  Node* BuildGlobalStore(Handle<Name> name, Node* value,
+                         const VectorSlotPair& feedback);
+
+  // Builders for dynamic variable loads and stores.
+  Node* BuildDynamicLoad(Handle<Name> name, TypeofMode typeof_mode);
+  Node* BuildDynamicStore(Handle<Name> name, Node* value);
 
   // Builders for accessing the function context.
   Node* BuildLoadGlobalObject();
   Node* BuildLoadNativeContextField(int index);
-  Node* BuildLoadGlobalProxy();
-  Node* BuildLoadFeedbackVector();
-
-  // Builder for accessing a (potentially immutable) object field.
-  Node* BuildLoadObjectField(Node* object, int offset);
-  Node* BuildLoadImmutableObjectField(Node* object, int offset);
-
-  // Builders for accessing external references.
-  Node* BuildLoadExternal(ExternalReference ref, MachineType type);
-  Node* BuildStoreExternal(ExternalReference ref, MachineType type, Node* val);
 
   // Builders for automatic type conversion.
-  Node* BuildToBoolean(Node* input);
+  Node* BuildToBoolean(Node* input, TypeFeedbackId feedback_id);
   Node* BuildToName(Node* input, BailoutId bailout_id);
   Node* BuildToObject(Node* input, BailoutId bailout_id);
 
   // Builder for adding the [[HomeObject]] to a value if the value came from a
   // function literal and needs a home object. Do nothing otherwise.
   Node* BuildSetHomeObject(Node* value, Node* home_object,
-                           ObjectLiteralProperty* property,
-                           int slot_number = 0);
+                           LiteralProperty* property, int slot_number = 0);
 
   // Builders for error reporting at runtime.
   Node* BuildThrowError(Node* exception, BailoutId bailout_id);
@@ -338,7 +358,6 @@ class AstGraphBuilder : public AstVisitor {
   Node* BuildThrowUnsupportedSuperError(BailoutId bailout_id);
 
   // Builders for dynamic hole-checks at runtime.
-  Node* BuildHoleCheckSilent(Node* value, Node* for_hole, Node* not_hole);
   Node* BuildHoleCheckThenThrow(Node* value, Variable* var, Node* not_hole,
                                 BailoutId bailout_id);
   Node* BuildHoleCheckElseThrow(Node* value, Variable* var, Node* for_hole,
@@ -352,11 +371,33 @@ class AstGraphBuilder : public AstVisitor {
   Node* BuildThrow(Node* exception_value);
 
   // Builders for binary operations.
-  Node* BuildBinaryOp(Node* left, Node* right, Token::Value op);
+  Node* BuildBinaryOp(Node* left, Node* right, Token::Value op,
+                      TypeFeedbackId feedback_id);
 
   // Process arguments to a call by popping {arity} elements off the operand
   // stack and build a call node using the given call operator.
   Node* ProcessArguments(const Operator* op, int arity);
+
+  // ===========================================================================
+  // The following build methods have the same contract as the above ones, but
+  // they can also return {nullptr} to indicate that no fragment was built. Note
+  // that these are optimizations, disabling any of them should still produce
+  // correct graphs.
+
+  // Optimization for variable load from global object.
+  Node* TryLoadGlobalConstant(Handle<Name> name);
+
+  // Optimization for variable load of dynamic lookup slot that is most likely
+  // to resolve to a global slot or context slot (inferred from scope chain).
+  Node* TryLoadDynamicVariable(Variable* variable, Handle<String> name,
+                               BailoutId bailout_id,
+                               const VectorSlotPair& feedback,
+                               OutputFrameStateCombine combine,
+                               TypeofMode typeof_mode);
+
+  // Optimizations for automatic type conversion.
+  Node* TryFastToBoolean(Node* input);
+  Node* TryFastToName(Node* input);
 
   // ===========================================================================
   // The following visitation methods all recursively visit a subtree of the
@@ -379,7 +420,8 @@ class AstGraphBuilder : public AstVisitor {
   void VisitForValues(ZoneList<Expression*>* exprs);
 
   // Common for all IterationStatement bodies.
-  void VisitIterationBody(IterationStatement* stmt, LoopBuilder* loop);
+  void VisitIterationBody(IterationStatement* stmt, LoopBuilder* loop,
+                          BailoutId stack_check_id);
 
   // Dispatched from VisitCall.
   void VisitCallSuper(Call* expr);
@@ -393,10 +435,19 @@ class AstGraphBuilder : public AstVisitor {
   void VisitTypeof(UnaryOperation* expr);
   void VisitNot(UnaryOperation* expr);
 
+  // Dispatched from VisitTypeof, VisitLiteralCompareTypeof.
+  void VisitTypeofExpression(Expression* expr);
+
   // Dispatched from VisitBinaryOperation.
   void VisitComma(BinaryOperation* expr);
   void VisitLogicalExpression(BinaryOperation* expr);
   void VisitArithmeticExpression(BinaryOperation* expr);
+
+  // Dispatched from VisitCompareOperation.
+  void VisitLiteralCompareNil(CompareOperation* expr, Expression* sub_expr,
+                              Node* nil_value);
+  void VisitLiteralCompareTypeof(CompareOperation* expr, Expression* sub_expr,
+                                 Handle<String> check);
 
   // Dispatched from VisitForInStatement.
   void VisitForInAssignment(Expression* expr, Node* value,
@@ -406,9 +457,6 @@ class AstGraphBuilder : public AstVisitor {
   // Dispatched from VisitObjectLiteral.
   void VisitObjectLiteralAccessor(Node* home_object,
                                   ObjectLiteralProperty* property);
-
-  // Dispatched from VisitClassLiteral.
-  void VisitClassLiteralContents(ClassLiteral* expr);
 
   DEFINE_AST_VISITOR_SUBCLASS_MEMBERS();
   DISALLOW_COPY_AND_ASSIGN(AstGraphBuilder);
@@ -425,7 +473,8 @@ class AstGraphBuilder : public AstVisitor {
 //
 class AstGraphBuilder::Environment : public ZoneObject {
  public:
-  Environment(AstGraphBuilder* builder, Scope* scope, Node* control_dependency);
+  Environment(AstGraphBuilder* builder, DeclarationScope* scope,
+              Node* control_dependency);
 
   int parameters_count() const { return parameters_count_; }
   int locals_count() const { return locals_count_; }
@@ -491,7 +540,12 @@ class AstGraphBuilder::Environment : public ZoneObject {
   // Preserve a checkpoint of the environment for the IR graph. Any
   // further mutation of the environment will not affect checkpoints.
   Node* Checkpoint(BailoutId ast_id, OutputFrameStateCombine combine =
-                                         OutputFrameStateCombine::Ignore());
+                                         OutputFrameStateCombine::Ignore(),
+                   bool node_has_exception = false);
+
+  // Inserts a loop exit control node and renames the environment.
+  // This is useful for loop peeling to insert phis at loop exits.
+  void PrepareForLoopExit(Node* loop, BitVector* assigned_variables);
 
   // Control dependency tracked by this environment.
   Node* GetControlDependency() { return control_dependency_; }
@@ -526,6 +580,11 @@ class AstGraphBuilder::Environment : public ZoneObject {
   // Copies this environment at a loop header control-flow point.
   Environment* CopyForLoop(BitVector* assigned, bool is_osr = false);
 
+  // Copies this environment for Osr entry. This only produces environment
+  // of the right shape, the caller is responsible for filling in the right
+  // values and dependencies.
+  Environment* CopyForOsrEntry();
+
  private:
   AstGraphBuilder* builder_;
   int parameters_count_;
@@ -543,7 +602,6 @@ class AstGraphBuilder::Environment : public ZoneObject {
                        LivenessAnalyzerBlock* liveness_block);
   Environment* CopyAndShareLiveness();
   void UpdateStateValues(Node** state_values, int offset, int count);
-  void UpdateStateValuesWithCache(Node** state_values, int offset, int count);
   Zone* zone() const { return builder_->local_zone(); }
   Graph* graph() const { return builder_->graph(); }
   AstGraphBuilder* builder() const { return builder_; }
@@ -555,7 +613,37 @@ class AstGraphBuilder::Environment : public ZoneObject {
   bool IsLivenessBlockConsistent();
 
   // Prepare environment to be used as loop header.
-  void PrepareForLoop(BitVector* assigned, bool is_osr = false);
+  void PrepareForLoop(BitVector* assigned);
+  void PrepareForOsrEntry();
+};
+
+class AstGraphBuilderWithPositions final : public AstGraphBuilder {
+ public:
+  AstGraphBuilderWithPositions(Zone* local_zone, CompilationInfo* info,
+                               JSGraph* jsgraph, float invocation_frequency,
+                               LoopAssignmentAnalysis* loop_assignment,
+                               TypeHintAnalysis* type_hint_analysis,
+                               SourcePositionTable* source_positions,
+                               int inlining_id = SourcePosition::kNotInlined);
+
+  bool CreateGraph(bool stack_check = true) {
+    SourcePositionTable::Scope pos_scope(source_positions_, start_position_);
+    return AstGraphBuilder::CreateGraph(stack_check);
+  }
+
+#define DEF_VISIT(type)                                                  \
+  void Visit##type(type* node) override {                                \
+    SourcePositionTable::Scope pos(                                      \
+        source_positions_,                                               \
+        SourcePosition(node->position(), start_position_.InliningId())); \
+    AstGraphBuilder::Visit##type(node);                                  \
+  }
+  AST_NODE_LIST(DEF_VISIT)
+#undef DEF_VISIT
+
+ private:
+  SourcePositionTable* const source_positions_;
+  SourcePosition const start_position_;
 };
 
 }  // namespace compiler

@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include "src/base/macros.h"
+#include "src/globals.h"
 
 namespace v8 {
 namespace internal {
@@ -33,14 +34,13 @@ enum PerIsolateAssertType {
   COMPILATION_ASSERT
 };
 
-
 template <PerThreadAssertType kType, bool kAllow>
 class PerThreadAssertScope {
  public:
-  PerThreadAssertScope();
-  ~PerThreadAssertScope();
+  V8_EXPORT_PRIVATE PerThreadAssertScope();
+  V8_EXPORT_PRIVATE ~PerThreadAssertScope();
 
-  static bool IsAllowed();
+  V8_EXPORT_PRIVATE static bool IsAllowed();
 
  private:
   PerThreadAssertData* data_;
@@ -170,6 +170,7 @@ typedef PerIsolateAssertScopeDebugOnly<COMPILATION_ASSERT, false>
 // Scope to introduce an exception to DisallowDeoptimization.
 typedef PerIsolateAssertScopeDebugOnly<COMPILATION_ASSERT, true>
     AllowCompilation;
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_ASSERT_SCOPE_H_

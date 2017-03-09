@@ -41,7 +41,8 @@ bool AllocatedOperandMatches(
     const AllocatedOperand& op,
     const InstructionSequenceTest::TestOperand& test_op) {
   return AreOperandsOfSameType(op, test_op) &&
-         (op.index() == test_op.value_ ||
+         ((op.IsRegister() ? op.GetRegister().code() : op.index()) ==
+              test_op.value_ ||
           test_op.value_ == InstructionSequenceTest::kNoValue);
 }
 
@@ -75,7 +76,8 @@ bool IsParallelMovePresent(int instr_index, Instruction::GapPosition gap_pos,
   }
   return found_match;
 }
-}
+
+}  // namespace
 
 
 class RegisterAllocatorTest : public InstructionSequenceTest {
@@ -99,6 +101,18 @@ TEST_F(RegisterAllocatorTest, CanAllocateThreeRegisters) {
   Allocate();
 }
 
+TEST_F(RegisterAllocatorTest, CanAllocateFPRegisters) {
+  StartBlock();
+  TestOperand inputs[] = {
+      Reg(FPParameter(kFloat64)), Reg(FPParameter(kFloat64)),
+      Reg(FPParameter(kFloat32)), Reg(FPParameter(kFloat32)),
+      Reg(FPParameter(kSimd128)), Reg(FPParameter(kSimd128))};
+  VReg out1 = EmitOI(FPReg(1, kFloat64), arraysize(inputs), inputs);
+  Return(out1);
+  EndBlock(Last());
+
+  Allocate();
+}
 
 TEST_F(RegisterAllocatorTest, SimpleLoop) {
   // i = K;
@@ -307,11 +321,11 @@ TEST_F(RegisterAllocatorTest, SpillPhi) {
   EndBlock(Branch(Imm(), 1, 2));
 
   StartBlock();
-  auto left = Define(Reg(0));
+  auto left = Define(Reg(GetAllocatableCode(0)));
   EndBlock(Jump(2));
 
   StartBlock();
-  auto right = Define(Reg(0));
+  auto right = Define(Reg(GetAllocatableCode(0)));
   EndBlock();
 
   StartBlock();
@@ -676,8 +690,7 @@ TEST_F(RegisterAllocatorTest, MultipleDeferredBlockSpills) {
 
   Allocate();
   // TODO(mtrofin): at the moment, the linear allocator spills var1 and var2,
-  // so only var3 is spilled in deferred blocks. Greedy avoids spilling 1&2.
-  // Expand the test once greedy is back online with this facility.
+  // so only var3 is spilled in deferred blocks.
   const int var3_reg = 2;
   const int var3_slot = 2;
 
@@ -722,7 +735,8 @@ class SlotConstraintTest : public RegisterAllocatorTest,
  private:
   typedef ::testing::WithParamInterface<::testing::tuple<ParameterType, int>> B;
 };
-}
+
+}  // namespace
 
 
 #if GTEST_HAS_COMBINE

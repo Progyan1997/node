@@ -2,18 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/compiler/compiler-source-position-table.h"
 #include "src/compiler/js-context-specialization.h"
 #include "src/compiler/js-graph.h"
 #include "src/compiler/js-operator.h"
 #include "src/compiler/node-matchers.h"
 #include "src/compiler/node-properties.h"
-#include "src/compiler/source-position.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/compiler/function-tester.h"
 #include "test/cctest/compiler/graph-builder-tester.h"
 
-using namespace v8::internal;
-using namespace v8::internal::compiler;
+namespace v8 {
+namespace internal {
+namespace compiler {
 
 class ContextSpecializationTester : public HandleAndZoneScope {
  public:
@@ -23,7 +24,8 @@ class ContextSpecializationTester : public HandleAndZoneScope {
         javascript_(main_zone()),
         machine_(main_zone()),
         simplified_(main_zone()),
-        jsgraph_(main_isolate(), graph(), common(), &javascript_, &machine_),
+        jsgraph_(main_isolate(), graph(), common(), &javascript_, &simplified_,
+                 &machine_),
         reducer_(main_zone(), graph()),
         spec_(&reducer_, jsgraph(), MaybeHandle<Context>()) {}
 
@@ -60,7 +62,7 @@ TEST(ReduceJSLoadContext) {
   subcontext2->set_previous(*subcontext1);
   subcontext1->set_previous(*native);
   Handle<Object> expected = t.factory()->InternalizeUtf8String("gboy!");
-  const int slot = Context::GLOBAL_OBJECT_INDEX;
+  const int slot = Context::NATIVE_CONTEXT_INDEX;
   native->set(slot, *expected);
 
   Node* const_context = t.jsgraph()->Constant(native);
@@ -131,7 +133,7 @@ TEST(ReduceJSStoreContext) {
   subcontext2->set_previous(*subcontext1);
   subcontext1->set_previous(*native);
   Handle<Object> expected = t.factory()->InternalizeUtf8String("gboy!");
-  const int slot = Context::GLOBAL_OBJECT_INDEX;
+  const int slot = Context::NATIVE_CONTEXT_INDEX;
   native->set(slot, *expected);
 
   Node* const_context = t.jsgraph()->Constant(native);
@@ -184,81 +186,6 @@ TEST(ReduceJSStoreContext) {
 }
 
 
-// TODO(titzer): factor out common code with effects checking in typed lowering.
-static void CheckEffectInput(Node* effect, Node* use) {
-  CHECK_EQ(effect, NodeProperties::GetEffectInput(use));
-}
-
-
-TEST(SpecializeToContext) {
-  ContextSpecializationTester t;
-
-  Node* start = t.graph()->NewNode(t.common()->Start(0));
-  t.graph()->SetStart(start);
-
-  // Make a context and initialize it a bit for this test.
-  Handle<Context> native = t.factory()->NewNativeContext();
-  Handle<Object> expected = t.factory()->InternalizeUtf8String("gboy!");
-  const int slot = Context::GLOBAL_OBJECT_INDEX;
-  native->set(slot, *expected);
-
-  Node* const_context = t.jsgraph()->Constant(native);
-  Node* param_context = t.graph()->NewNode(t.common()->Parameter(0), start);
-
-  {
-    // Check that specialization replaces values and forwards effects
-    // correctly, and folds values from constant and non-constant contexts
-    Node* effect_in = start;
-    Node* load = t.graph()->NewNode(t.javascript()->LoadContext(0, slot, true),
-                                    const_context, const_context, effect_in);
-
-
-    Node* value_use =
-        t.graph()->NewNode(t.simplified()->ChangeTaggedToInt32(), load);
-    Node* other_load =
-        t.graph()->NewNode(t.javascript()->LoadContext(0, slot, true),
-                           param_context, param_context, load);
-    Node* effect_use = other_load;
-    Node* other_use =
-        t.graph()->NewNode(t.simplified()->ChangeTaggedToInt32(), other_load);
-
-    Node* add = t.graph()->NewNode(
-        t.javascript()->Add(LanguageMode::SLOPPY), value_use, other_use,
-        param_context, t.jsgraph()->EmptyFrameState(),
-        t.jsgraph()->EmptyFrameState(), other_load, start);
-
-    Node* ret =
-        t.graph()->NewNode(t.common()->Return(), add, effect_use, start);
-    Node* end = t.graph()->NewNode(t.common()->End(1), ret);
-    USE(end);
-    t.graph()->SetEnd(end);
-
-    // Double check the above graph is what we expect, or the test is broken.
-    CheckEffectInput(effect_in, load);
-    CheckEffectInput(load, effect_use);
-
-    // Perform the reduction on the entire graph.
-    GraphReducer graph_reducer(t.main_zone(), t.graph());
-    JSContextSpecialization spec(&graph_reducer, t.jsgraph(),
-                                 MaybeHandle<Context>());
-    graph_reducer.AddReducer(&spec);
-    graph_reducer.ReduceGraph();
-
-    // Effects should have been forwarded (not replaced with a value).
-    CheckEffectInput(effect_in, effect_use);
-
-    // Use of {other_load} should not have been replaced.
-    CHECK_EQ(other_load, other_use->InputAt(0));
-
-    Node* replacement = value_use->InputAt(0);
-    HeapObjectMatcher match(replacement);
-    CHECK(match.HasValue());
-    CHECK_EQ(*expected, *match.Value());
-  }
-  // TODO(titzer): clean up above test and test more complicated effects.
-}
-
-
 TEST(SpecializeJSFunction_ToConstant1) {
   FunctionTester T(
       "(function() { var x = 1; function inc(a)"
@@ -298,10 +225,14 @@ TEST(SpecializeJSFunction_ToConstant_uninit) {
     FunctionTester T(
         "(function() { if (false) { var x = 1; } function inc(a)"
         " { return x; } return inc; })()");  // x is undefined!
-
-    CHECK(T.Call(T.Val(0.0), T.Val(0.0)).ToHandleChecked()->IsUndefined());
-    CHECK(T.Call(T.Val(2.0), T.Val(0.0)).ToHandleChecked()->IsUndefined());
-    CHECK(T.Call(T.Val(-2.1), T.Val(0.0)).ToHandleChecked()->IsUndefined());
+    i::Isolate* isolate = CcTest::i_isolate();
+    CHECK(
+        T.Call(T.Val(0.0), T.Val(0.0)).ToHandleChecked()->IsUndefined(isolate));
+    CHECK(
+        T.Call(T.Val(2.0), T.Val(0.0)).ToHandleChecked()->IsUndefined(isolate));
+    CHECK(T.Call(T.Val(-2.1), T.Val(0.0))
+              .ToHandleChecked()
+              ->IsUndefined(isolate));
   }
 
   {
@@ -314,3 +245,7 @@ TEST(SpecializeJSFunction_ToConstant_uninit) {
     CHECK(T.Call(T.Val(-2.1), T.Val(0.0)).ToHandleChecked()->IsNaN());
   }
 }
+
+}  // namespace compiler
+}  // namespace internal
+}  // namespace v8

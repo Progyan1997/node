@@ -15,7 +15,6 @@ namespace internal {
 
 enum NativeType {
   CORE,
-  CODE_STUB,
   EXPERIMENTAL,
   EXTRAS,
   EXPERIMENTAL_EXTRAS,
@@ -23,8 +22,15 @@ enum NativeType {
   TEST
 };
 
+// Extra handling for V8_EXPORT_PRIVATE in combination with USING_V8_SHARED
+// since definition of methods of classes marked as dllimport is not allowed.
 template <NativeType type>
+#ifdef USING_V8_SHARED
 class NativesCollection {
+#else
+class V8_EXPORT_PRIVATE NativesCollection {
+#endif  // USING_V8_SHARED
+
  public:
   // The following methods are implemented in js2c-generated code:
 
@@ -45,11 +51,9 @@ class NativesCollection {
   // The following methods are implemented in natives-common.cc:
 
   static FixedArray* GetSourceCache(Heap* heap);
-  static void UpdateSourceCache(Heap* heap);
 };
 
 typedef NativesCollection<CORE> Natives;
-typedef NativesCollection<CODE_STUB> CodeStubNatives;
 typedef NativesCollection<EXPERIMENTAL> ExperimentalNatives;
 typedef NativesCollection<EXTRAS> ExtraNatives;
 typedef NativesCollection<EXPERIMENTAL_EXTRAS> ExperimentalExtraNatives;
@@ -62,6 +66,7 @@ void ReadNatives();
 void DisposeNatives();
 #endif
 
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_SNAPSHOT_NATIVES_H_

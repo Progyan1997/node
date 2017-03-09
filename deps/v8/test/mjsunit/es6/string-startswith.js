@@ -34,6 +34,7 @@ assertFalse(testString.startsWith("hello"));
 assertFalse(testString.startsWith("Hello World!"));
 assertFalse(testString.startsWith(null));
 assertFalse(testString.startsWith(undefined));
+assertFalse(testString.startsWith());
 
 assertTrue("null".startsWith(null));
 assertTrue("undefined".startsWith(undefined));
@@ -399,3 +400,11 @@ assertThrows(function() {
     "toString": function() { return "abc"; }
   }, [/./]);
 }, TypeError);
+
+// startsWith does its brand checks with Symbol.match
+var re = /./;
+assertThrows(function() {
+  "".startsWith(re);
+}, TypeError);
+re[Symbol.match] = false;
+assertEquals(false, "".startsWith(re));

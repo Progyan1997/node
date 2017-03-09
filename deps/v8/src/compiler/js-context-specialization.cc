@@ -34,25 +34,7 @@ MaybeHandle<Context> JSContextSpecialization::GetSpecializationContext(
   DCHECK(node->opcode() == IrOpcode::kJSLoadContext ||
          node->opcode() == IrOpcode::kJSStoreContext);
   Node* const object = NodeProperties::GetValueInput(node, 0);
-  switch (object->opcode()) {
-    case IrOpcode::kHeapConstant:
-      return Handle<Context>::cast(OpParameter<Handle<HeapObject>>(object));
-    case IrOpcode::kParameter: {
-      Node* const start = NodeProperties::GetValueInput(object, 0);
-      DCHECK_EQ(IrOpcode::kStart, start->opcode());
-      int const index = ParameterIndexOf(object->op());
-      // The context is always the last parameter to a JavaScript function, and
-      // {Parameter} indices start at -1, so value outputs of {Start} look like
-      // this: closure, receiver, param0, ..., paramN, context.
-      if (index == start->op()->ValueOutputCount() - 2) {
-        return context();
-      }
-      break;
-    }
-    default:
-      break;
-  }
-  return MaybeHandle<Context>();
+  return NodeProperties::GetSpecializationContext(object, context());
 }
 
 
@@ -88,7 +70,7 @@ Reduction JSContextSpecialization::ReduceJSLoadContext(Node* node) {
   // before the function to which it belongs has initialized the slot.
   // We must be conservative and check if the value in the slot is currently the
   // hole or undefined. If it is neither of these, then it must be initialized.
-  if (value->IsUndefined() || value->IsTheHole()) {
+  if (value->IsUndefined(isolate()) || value->IsTheHole(isolate())) {
     return NoChange();
   }
 

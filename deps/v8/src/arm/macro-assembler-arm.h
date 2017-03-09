@@ -14,17 +14,20 @@ namespace v8 {
 namespace internal {
 
 // Give alias names to registers for calling conventions.
-const Register kReturnRegister0 = {kRegister_r0_Code};
-const Register kReturnRegister1 = {kRegister_r1_Code};
-const Register kJSFunctionRegister = {kRegister_r1_Code};
-const Register kContextRegister = {kRegister_r7_Code};
-const Register kInterpreterAccumulatorRegister = {kRegister_r0_Code};
-const Register kInterpreterRegisterFileRegister = {kRegister_r4_Code};
-const Register kInterpreterBytecodeOffsetRegister = {kRegister_r5_Code};
-const Register kInterpreterBytecodeArrayRegister = {kRegister_r6_Code};
-const Register kInterpreterDispatchTableRegister = {kRegister_r8_Code};
-const Register kRuntimeCallFunctionRegister = {kRegister_r1_Code};
-const Register kRuntimeCallArgCountRegister = {kRegister_r0_Code};
+const Register kReturnRegister0 = {Register::kCode_r0};
+const Register kReturnRegister1 = {Register::kCode_r1};
+const Register kReturnRegister2 = {Register::kCode_r2};
+const Register kJSFunctionRegister = {Register::kCode_r1};
+const Register kContextRegister = {Register::kCode_r7};
+const Register kAllocateSizeRegister = {Register::kCode_r1};
+const Register kInterpreterAccumulatorRegister = {Register::kCode_r0};
+const Register kInterpreterBytecodeOffsetRegister = {Register::kCode_r5};
+const Register kInterpreterBytecodeArrayRegister = {Register::kCode_r6};
+const Register kInterpreterDispatchTableRegister = {Register::kCode_r8};
+const Register kJavaScriptCallArgCountRegister = {Register::kCode_r0};
+const Register kJavaScriptCallNewTargetRegister = {Register::kCode_r3};
+const Register kRuntimeCallFunctionRegister = {Register::kCode_r1};
+const Register kRuntimeCallArgCountRegister = {Register::kCode_r0};
 
 // ----------------------------------------------------------------------------
 // Static helper functions
@@ -36,9 +39,9 @@ inline MemOperand FieldMemOperand(Register object, int offset) {
 
 
 // Give alias names to registers
-const Register cp = { kRegister_r7_Code };  // JavaScript context pointer.
-const Register pp = { kRegister_r8_Code };  // Constant pool pointer.
-const Register kRootRegister = { kRegister_r10_Code };  // Roots array pointer.
+const Register cp = {Register::kCode_r7};  // JavaScript context pointer.
+const Register pp = {Register::kCode_r8};  // Constant pool pointer.
+const Register kRootRegister = {Register::kCode_r10};  // Roots array pointer.
 
 // Flags used for AllocateHeapNumber
 enum TaggingMode {
@@ -86,11 +89,8 @@ enum TargetAddressStorageMode {
 // MacroAssembler implements a collection of frequently used macros.
 class MacroAssembler: public Assembler {
  public:
-  // The isolate parameter can be NULL if the macro assembler should
-  // not use isolate-dependent functionality. In this case, it's the
-  // responsibility of the caller to never invoke such function on the
-  // macro assembler.
-  MacroAssembler(Isolate* isolate, void* buffer, int size);
+  MacroAssembler(Isolate* isolate, void* buffer, int size,
+                 CodeObjectRequired create_code_object);
 
 
   // Returns the size of a call in instructions. Note, the value returned is
@@ -101,10 +101,6 @@ class MacroAssembler: public Assembler {
   int CallStubSize(CodeStub* stub,
                    TypeFeedbackId ast_id = TypeFeedbackId::None(),
                    Condition cond = al);
-  static int CallSizeNotPredictableCodeSize(Isolate* isolate,
-                                            Address target,
-                                            RelocInfo::Mode rmode,
-                                            Condition cond = al);
 
   // Jump, Call, and Ret pseudo instructions implementing inter-working.
   void Jump(Register target, Condition cond = al);
@@ -114,20 +110,35 @@ class MacroAssembler: public Assembler {
   void Call(Address target, RelocInfo::Mode rmode,
             Condition cond = al,
             TargetAddressStorageMode mode = CAN_INLINE_TARGET_ADDRESS);
+  void Call(Handle<Code> code, RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
+            TypeFeedbackId ast_id = TypeFeedbackId::None(), Condition cond = al,
+            TargetAddressStorageMode mode = CAN_INLINE_TARGET_ADDRESS);
   int CallSize(Handle<Code> code,
                RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
                TypeFeedbackId ast_id = TypeFeedbackId::None(),
                Condition cond = al);
-  void Call(Handle<Code> code,
-            RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
-            TypeFeedbackId ast_id = TypeFeedbackId::None(),
-            Condition cond = al,
-            TargetAddressStorageMode mode = CAN_INLINE_TARGET_ADDRESS);
   void Ret(Condition cond = al);
+
+  // Used for patching in calls to the deoptimizer.
+  void CallDeoptimizer(Address target);
+  static int CallDeoptimizerSize();
+
+  // Emit code that loads |parameter_index|'th parameter from the stack to
+  // the register according to the CallInterfaceDescriptor definition.
+  // |sp_to_caller_sp_offset_in_words| specifies the number of words pushed
+  // below the caller's sp.
+  template <class Descriptor>
+  void LoadParameterFromStack(
+      Register reg, typename Descriptor::ParameterIndices parameter_index,
+      int sp_to_ra_offset_in_words = 0) {
+    DCHECK(Descriptor::kPassLastArgsOnStack);
+    UNIMPLEMENTED();
+  }
 
   // Emit code to discard a non-negative number of pointer-sized elements
   // from the stack, clobbering only the sp register.
   void Drop(int count, Condition cond = al);
+  void Drop(Register count, Condition cond = al);
 
   void Ret(int drop, Condition cond = al);
 
@@ -156,8 +167,6 @@ class MacroAssembler: public Assembler {
            int width,
            Condition cond = al);
   void Bfc(Register dst, Register src, int lsb, int width, Condition cond = al);
-  void Usat(Register dst, int satpos, const Operand& src,
-            Condition cond = al);
 
   void Call(Label* target);
   void Push(Register src) { push(src); }
@@ -173,7 +182,8 @@ class MacroAssembler: public Assembler {
       mov(dst, src, sbit, cond);
     }
   }
-  void Move(DwVfpRegister dst, DwVfpRegister src);
+  void Move(SwVfpRegister dst, SwVfpRegister src, Condition cond = al);
+  void Move(DwVfpRegister dst, DwVfpRegister src, Condition cond = al);
 
   void Load(Register dst, const MemOperand& src, Representation r);
   void Store(Register src, const MemOperand& dst, Representation r);
@@ -219,7 +229,7 @@ class MacroAssembler: public Assembler {
   void JumpIfNotInNewSpace(Register object,
                            Register scratch,
                            Label* branch) {
-    InNewSpace(object, scratch, ne, branch);
+    InNewSpace(object, scratch, eq, branch);
   }
 
   // Check if object is in new space.  Jumps if the object is in new space.
@@ -227,7 +237,7 @@ class MacroAssembler: public Assembler {
   void JumpIfInNewSpace(Register object,
                         Register scratch,
                         Label* branch) {
-    InNewSpace(object, scratch, eq, branch);
+    InNewSpace(object, scratch, ne, branch);
   }
 
   // Check if an object has a given incremental marking color.
@@ -243,22 +253,10 @@ class MacroAssembler: public Assembler {
                    Register scratch1,
                    Label* on_black);
 
-  // Checks the color of an object.  If the object is already grey or black
-  // then we just fall through, since it is already live.  If it is white and
-  // we can determine that it doesn't need to be scanned, then we just mark it
-  // black and fall through.  For the rest we jump to the label so the
-  // incremental marker can fix its assumptions.
-  void EnsureNotWhite(Register object,
-                      Register scratch1,
-                      Register scratch2,
-                      Register scratch3,
-                      Label* object_is_white_and_not_data);
-
-  // Detects conservatively whether an object is data-only, i.e. it does need to
-  // be scanned by the garbage collector.
-  void JumpIfDataObject(Register value,
-                        Register scratch,
-                        Label* not_data_object);
+  // Checks the color of an object.  If the object is white we jump to the
+  // incremental marker.
+  void JumpIfWhite(Register value, Register scratch1, Register scratch2,
+                   Register scratch3, Label* value_is_white);
 
   // Notify the garbage collector that we wrote a pointer into an object.
   // |object| is the object being stored into, |value| is the object being
@@ -301,6 +299,11 @@ class MacroAssembler: public Assembler {
                      pointers_to_here_check_for_value);
   }
 
+  // Notify the garbage collector that we wrote a code entry into a
+  // JSFunction. Only scratch is clobbered by the operation.
+  void RecordWriteCodeEntryField(Register js_function, Register code_entry,
+                                 Register scratch);
+
   void RecordWriteForMap(
       Register object,
       Register map,
@@ -328,7 +331,6 @@ class MacroAssembler: public Assembler {
 
   // Push two registers.  Pushes leftmost register first (to highest address).
   void Push(Register src1, Register src2, Condition cond = al) {
-    DCHECK(!src1.is(src2));
     if (src1.code() > src2.code()) {
       stm(db_w, sp, src1.bit() | src2.bit(), cond);
     } else {
@@ -339,7 +341,6 @@ class MacroAssembler: public Assembler {
 
   // Push three registers.  Pushes leftmost register first (to highest address).
   void Push(Register src1, Register src2, Register src3, Condition cond = al) {
-    DCHECK(!AreAliased(src1, src2, src3));
     if (src1.code() > src2.code()) {
       if (src2.code() > src3.code()) {
         stm(db_w, sp, src1.bit() | src2.bit() | src3.bit(), cond);
@@ -359,7 +360,6 @@ class MacroAssembler: public Assembler {
             Register src3,
             Register src4,
             Condition cond = al) {
-    DCHECK(!AreAliased(src1, src2, src3, src4));
     if (src1.code() > src2.code()) {
       if (src2.code() > src3.code()) {
         if (src3.code() > src4.code()) {
@@ -384,7 +384,6 @@ class MacroAssembler: public Assembler {
   // Push five registers.  Pushes leftmost register first (to highest address).
   void Push(Register src1, Register src2, Register src3, Register src4,
             Register src5, Condition cond = al) {
-    DCHECK(!AreAliased(src1, src2, src3, src4, src5));
     if (src1.code() > src2.code()) {
       if (src2.code() > src3.code()) {
         if (src3.code() > src4.code()) {
@@ -467,10 +466,14 @@ class MacroAssembler: public Assembler {
   }
 
   // Push a fixed frame, consisting of lr, fp, constant pool (if
-  // FLAG_enable_embedded_constant_pool), context and JS function / marker id if
-  // marker_reg is a valid register.
-  void PushFixedFrame(Register marker_reg = no_reg);
-  void PopFixedFrame(Register marker_reg = no_reg);
+  // FLAG_enable_embedded_constant_pool)
+  void PushCommonFrame(Register marker_reg = no_reg);
+
+  // Push a standard frame, consisting of lr, fp, constant pool (if
+  // FLAG_enable_embedded_constant_pool), context and JS function
+  void PushStandardFrame(Register function_reg);
+
+  void PopCommonFrame(Register marker_reg = no_reg);
 
   // Push and pop the registers that can hold pointers, as defined by the
   // RegList constant kSafepointSavedRegisters.
@@ -494,15 +497,6 @@ class MacroAssembler: public Assembler {
             Register src2,
             const MemOperand& dst,
             Condition cond = al);
-
-  // Ensure that FPSCR contains values needed by JavaScript.
-  // We need the NaNModeControlBit to be sure that operations like
-  // vadd and vsub generate the Canonical NaN (if a NaN must be generated).
-  // In VFP3 it will be always the Canonical NaN.
-  // In VFP2 it will be either the Canonical NaN or the negative version
-  // of the Canonical NaN. It doesn't matter if we have two values. The aim
-  // is to be sure to never generate the hole NaN.
-  void VFPEnsureFPSCRState(Register scratch);
 
   // If the value is a NaN, canonicalize the value else, do nothing.
   void VFPCanonicalizeNaN(const DwVfpRegister dst,
@@ -555,6 +549,27 @@ class MacroAssembler: public Assembler {
   void VmovLow(Register dst, DwVfpRegister src);
   void VmovLow(DwVfpRegister dst, Register src);
 
+  // Simulate s-register moves for imaginary s32 - s63 registers.
+  void VmovExtended(Register dst, int src_code);
+  void VmovExtended(int dst_code, Register src);
+  // Move between s-registers and imaginary s-registers.
+  void VmovExtended(int dst_code, int src_code, Register scratch);
+  void VmovExtended(int dst_code, const MemOperand& src, Register scratch);
+  void VmovExtended(const MemOperand& dst, int src_code, Register scratch);
+
+  void LslPair(Register dst_low, Register dst_high, Register src_low,
+               Register src_high, Register scratch, Register shift);
+  void LslPair(Register dst_low, Register dst_high, Register src_low,
+               Register src_high, uint32_t shift);
+  void LsrPair(Register dst_low, Register dst_high, Register src_low,
+               Register src_high, Register scratch, Register shift);
+  void LsrPair(Register dst_low, Register dst_high, Register src_low,
+               Register src_high, uint32_t shift);
+  void AsrPair(Register dst_low, Register dst_high, Register src_low,
+               Register src_high, Register scratch, Register shift);
+  void AsrPair(Register dst_low, Register dst_high, Register src_low,
+               Register src_high, uint32_t shift);
+
   // Loads the number from object into dst register.
   // If |object| is neither smi nor heap number, |not_number| is jumped to
   // with |object| still intact.
@@ -590,12 +605,13 @@ class MacroAssembler: public Assembler {
                          Label* not_int32);
 
   // Generates function and stub prologue code.
-  void StubPrologue();
+  void StubPrologue(StackFrame::Type type);
   void Prologue(bool code_pre_aging);
 
   // Enter exit frame.
   // stack_space - extra stack space, used for alignment before call to C.
-  void EnterExitFrame(bool save_doubles, int stack_space = 0);
+  void EnterExitFrame(bool save_doubles, int stack_space = 0,
+                      StackFrame::Type frame_type = StackFrame::EXIT);
 
   // Leave the current exit frame. Expects the return value in r0.
   // Expect the number of values, pushed prior to the exit frame, to
@@ -609,8 +625,15 @@ class MacroAssembler: public Assembler {
 
   void LoadContext(Register dst, int context_chain_length);
 
+  // Load the global object from the current context.
+  void LoadGlobalObject(Register dst) {
+    LoadNativeContextSlot(Context::EXTENSION_INDEX, dst);
+  }
+
   // Load the global proxy from the current context.
-  void LoadGlobalProxy(Register dst);
+  void LoadGlobalProxy(Register dst) {
+    LoadNativeContextSlot(Context::GLOBAL_PROXY_INDEX, dst);
+  }
 
   // Conditionally load the cached Array transitioned map of type
   // transitioned_kind from the native context if the map in register
@@ -623,7 +646,7 @@ class MacroAssembler: public Assembler {
       Register scratch,
       Label* no_map_match);
 
-  void LoadGlobalFunction(int index, Register function);
+  void LoadNativeContextSlot(int index, Register dst);
 
   // Load the initial map from the global function. The registers
   // function and map can be the same, function is then overwritten.
@@ -640,16 +663,29 @@ class MacroAssembler: public Assembler {
   // ---------------------------------------------------------------------------
   // JavaScript invokes
 
+  // Removes current frame and its arguments from the stack preserving
+  // the arguments and a return address pushed to the stack for the next call.
+  // Both |callee_args_count| and |caller_args_count_reg| do not include
+  // receiver. |callee_args_count| is not modified, |caller_args_count_reg|
+  // is trashed.
+  void PrepareForTailCall(const ParameterCount& callee_args_count,
+                          Register caller_args_count_reg, Register scratch0,
+                          Register scratch1);
+
   // Invoke the JavaScript function code by either calling or jumping.
-  void InvokeCode(Register code,
-                  const ParameterCount& expected,
-                  const ParameterCount& actual,
-                  InvokeFlag flag,
-                  const CallWrapper& call_wrapper);
+  void InvokeFunctionCode(Register function, Register new_target,
+                          const ParameterCount& expected,
+                          const ParameterCount& actual, InvokeFlag flag,
+                          const CallWrapper& call_wrapper);
+
+  void FloodFunctionIfStepping(Register fun, Register new_target,
+                               const ParameterCount& expected,
+                               const ParameterCount& actual);
 
   // Invoke the JavaScript function in the given register. Changes the
   // current context to the context in the function before invoking.
   void InvokeFunction(Register function,
+                      Register new_target,
                       const ParameterCount& actual,
                       InvokeFlag flag,
                       const CallWrapper& call_wrapper);
@@ -692,23 +728,7 @@ class MacroAssembler: public Assembler {
   // ---------------------------------------------------------------------------
   // Inline caching support
 
-  // Generate code for checking access rights - used for security checks
-  // on access to global objects across environments. The holder register
-  // is left untouched, whereas both scratch registers are clobbered.
-  void CheckAccessGlobalProxy(Register holder_reg,
-                              Register scratch,
-                              Label* miss);
-
   void GetNumberHash(Register t0, Register scratch);
-
-  void LoadFromNumberDictionary(Label* miss,
-                                Register elements,
-                                Register key,
-                                Register result,
-                                Register t0,
-                                Register t1,
-                                Register t2);
-
 
   inline void MarkCode(NopMarkerTypes type) {
     nop(type);
@@ -762,12 +782,17 @@ class MacroAssembler: public Assembler {
                 Label* gc_required,
                 AllocationFlags flags);
 
-  void Allocate(Register object_size,
-                Register result,
-                Register scratch1,
-                Register scratch2,
-                Label* gc_required,
-                AllocationFlags flags);
+  void Allocate(Register object_size, Register result, Register result_end,
+                Register scratch, Label* gc_required, AllocationFlags flags);
+
+  // FastAllocate is right now only used for folded allocations. It just
+  // increments the top pointer without checking against limit. This can only
+  // be done if it was proved earlier that the allocation will succeed.
+  void FastAllocate(int object_size, Register result, Register scratch1,
+                    Register scratch2, AllocationFlags flags);
+
+  void FastAllocate(Register object_size, Register result, Register result_end,
+                    Register scratch, AllocationFlags flags);
 
   void AllocateTwoByteString(Register result,
                              Register length,
@@ -803,7 +828,6 @@ class MacroAssembler: public Assembler {
                           Register scratch2,
                           Register heap_number_map,
                           Label* gc_required,
-                          TaggingMode tagging_mode = TAG_RESULT,
                           MutableMode mode = IMMUTABLE);
   void AllocateHeapNumberWithValue(Register result,
                                    DwVfpRegister value,
@@ -812,26 +836,17 @@ class MacroAssembler: public Assembler {
                                    Register heap_number_map,
                                    Label* gc_required);
 
-  // Copies a fixed number of fields of heap objects from src to dst.
-  void CopyFields(Register dst,
-                  Register src,
-                  LowDwVfpRegister double_scratch,
-                  int field_count);
+  // Allocate and initialize a JSValue wrapper with the specified {constructor}
+  // and {value}.
+  void AllocateJSValue(Register result, Register constructor, Register value,
+                       Register scratch1, Register scratch2,
+                       Label* gc_required);
 
-  // Copies a number of bytes from src to dst. All registers are clobbered. On
-  // exit src and dst will point to the place just after where the last byte was
-  // read or written and length will be zero.
-  void CopyBytes(Register src,
-                 Register dst,
-                 Register length,
-                 Register scratch);
-
-  // Initialize fields with filler values.  Fields starting at |start_offset|
-  // not including end_offset are overwritten with the value in |filler|.  At
-  // the end the loop, |start_offset| takes the value of |end_offset|.
-  void InitializeFieldsWithFiller(Register start_offset,
-                                  Register end_offset,
-                                  Register filler);
+  // Initialize fields with filler values.  Fields starting at |current_address|
+  // not including |end_address| are overwritten with the value in |filler|.  At
+  // the end the loop, |current_address| takes the value of |end_address|.
+  void InitializeFieldsWithFiller(Register current_address,
+                                  Register end_address, Register filler);
 
   // ---------------------------------------------------------------------------
   // Support functions.
@@ -868,13 +883,6 @@ class MacroAssembler: public Assembler {
   void CompareInstanceType(Register map,
                            Register type_reg,
                            InstanceType type);
-
-
-  // Check if a map for a JSObject indicates that the object has fast elements.
-  // Jump to the specified label if it does not.
-  void CheckFastElements(Register map,
-                         Register scratch,
-                         Label* fail);
 
   // Check if a map for a JSObject indicates that the object can have both smi
   // and HeapObject elements.  Jump to the specified label if it does not.
@@ -985,12 +993,6 @@ class MacroAssembler: public Assembler {
   }
 
 
-  // Picks out an array index from the hash field.
-  // Register use:
-  //   hash - holds the index's hash. Clobbered.
-  //   index - holds the overwritten index on exit.
-  void IndexFromHash(Register hash, Register index);
-
   // Get the number of least significant bits from a register
   void GetLeastBitsFromSmi(Register dst, Register src, int num_least_bits);
   void GetLeastBitsFromInt32(Register dst, Register src, int mun_least_bits);
@@ -1063,6 +1065,32 @@ class MacroAssembler: public Assembler {
   // values to location, restoring [d0..(d15|d31)].
   void RestoreFPRegs(Register location, Register scratch);
 
+  // Perform a floating-point min or max operation with the
+  // (IEEE-754-compatible) semantics of ARM64's fmin/fmax. Some cases, typically
+  // NaNs or +/-0.0, are expected to be rare and are handled in out-of-line
+  // code. The specific behaviour depends on supported instructions.
+  //
+  // These functions assume (and assert) that !left.is(right). It is permitted
+  // for the result to alias either input register.
+  void FloatMax(SwVfpRegister result, SwVfpRegister left, SwVfpRegister right,
+                Label* out_of_line);
+  void FloatMin(SwVfpRegister result, SwVfpRegister left, SwVfpRegister right,
+                Label* out_of_line);
+  void FloatMax(DwVfpRegister result, DwVfpRegister left, DwVfpRegister right,
+                Label* out_of_line);
+  void FloatMin(DwVfpRegister result, DwVfpRegister left, DwVfpRegister right,
+                Label* out_of_line);
+
+  // Generate out-of-line cases for the macros above.
+  void FloatMaxOutOfLine(SwVfpRegister result, SwVfpRegister left,
+                         SwVfpRegister right);
+  void FloatMinOutOfLine(SwVfpRegister result, SwVfpRegister left,
+                         SwVfpRegister right);
+  void FloatMaxOutOfLine(DwVfpRegister result, DwVfpRegister left,
+                         DwVfpRegister right);
+  void FloatMinOutOfLine(DwVfpRegister result, DwVfpRegister left,
+                         DwVfpRegister right);
+
   // ---------------------------------------------------------------------------
   // Runtime calls
 
@@ -1078,33 +1106,30 @@ class MacroAssembler: public Assembler {
   void CallRuntime(const Runtime::Function* f,
                    int num_arguments,
                    SaveFPRegsMode save_doubles = kDontSaveFPRegs);
-  void CallRuntimeSaveDoubles(Runtime::FunctionId id) {
-    const Runtime::Function* function = Runtime::FunctionForId(id);
+  void CallRuntimeSaveDoubles(Runtime::FunctionId fid) {
+    const Runtime::Function* function = Runtime::FunctionForId(fid);
     CallRuntime(function, function->nargs, kSaveFPRegs);
   }
 
   // Convenience function: Same as above, but takes the fid instead.
-  void CallRuntime(Runtime::FunctionId id,
-                   int num_arguments,
+  void CallRuntime(Runtime::FunctionId fid,
                    SaveFPRegsMode save_doubles = kDontSaveFPRegs) {
-    CallRuntime(Runtime::FunctionForId(id), num_arguments, save_doubles);
+    const Runtime::Function* function = Runtime::FunctionForId(fid);
+    CallRuntime(function, function->nargs, save_doubles);
+  }
+
+  // Convenience function: Same as above, but takes the fid instead.
+  void CallRuntime(Runtime::FunctionId fid, int num_arguments,
+                   SaveFPRegsMode save_doubles = kDontSaveFPRegs) {
+    CallRuntime(Runtime::FunctionForId(fid), num_arguments, save_doubles);
   }
 
   // Convenience function: call an external reference.
   void CallExternalReference(const ExternalReference& ext,
                              int num_arguments);
 
-  // Tail call of a runtime routine (jump).
-  // Like JumpToExternalReference, but also takes care of passing the number
-  // of parameters.
-  void TailCallExternalReference(const ExternalReference& ext,
-                                 int num_arguments,
-                                 int result_size);
-
   // Convenience function: tail call a runtime routine (jump).
-  void TailCallRuntime(Runtime::FunctionId fid,
-                       int num_arguments,
-                       int result_size);
+  void TailCallRuntime(Runtime::FunctionId fid);
 
   int CalculateStackPassedWords(int num_reg_arguments,
                                 int num_double_arguments);
@@ -1151,18 +1176,8 @@ class MacroAssembler: public Assembler {
   void MovFromFloatResult(DwVfpRegister dst);
 
   // Jump to a runtime routine.
-  void JumpToExternalReference(const ExternalReference& builtin);
-
-  // Invoke specified builtin JavaScript function.
-  void InvokeBuiltin(int native_context_index, InvokeFlag flag,
-                     const CallWrapper& call_wrapper = NullCallWrapper());
-
-  // Store the code object for the given builtin in the target register and
-  // setup the function in r1.
-  void GetBuiltinEntry(Register target, int native_context_index);
-
-  // Store the function for the given builtin in the target register.
-  void GetBuiltinFunction(Register target, int native_context_index);
+  void JumpToExternalReference(const ExternalReference& builtin,
+                               bool builtin_exit_frame = false);
 
   Handle<Object> CodeObject() {
     DCHECK(!code_object_.is_null());
@@ -1298,6 +1313,9 @@ class MacroAssembler: public Assembler {
   // Jump if either of the registers contain a smi.
   void JumpIfEitherSmi(Register reg1, Register reg2, Label* on_either_smi);
 
+  // Abort execution if argument is a number, enabled via --debug-code.
+  void AssertNotNumber(Register object);
+
   // Abort execution if argument is a smi, enabled via --debug-code.
   void AssertNotSmi(Register object);
   void AssertSmi(Register object);
@@ -1310,6 +1328,17 @@ class MacroAssembler: public Assembler {
 
   // Abort execution if argument is not a JSFunction, enabled via --debug-code.
   void AssertFunction(Register object);
+
+  // Abort execution if argument is not a JSBoundFunction,
+  // enabled via --debug-code.
+  void AssertBoundFunction(Register object);
+
+  // Abort execution if argument is not a JSGeneratorObject,
+  // enabled via --debug-code.
+  void AssertGeneratorObject(Register object);
+
+  // Abort execution if argument is not a JSReceiver, enabled via --debug-code.
+  void AssertReceiver(Register object);
 
   // Abort execution if argument is not undefined or an AllocationSite, enabled
   // via --debug-code.
@@ -1418,9 +1447,12 @@ class MacroAssembler: public Assembler {
   // Returns the pc offset at which the frame ends.
   int LeaveFrame(StackFrame::Type type);
 
+  void EnterBuiltinFrame(Register context, Register target, Register argc);
+  void LeaveBuiltinFrame(Register context, Register target, Register argc);
+
   // Expects object in r0 and returns map with validated enum cache
   // in r0.  Assumes that any other register can be used as a scratch.
-  void CheckEnumCache(Register null_value, Label* call_runtime);
+  void CheckEnumCache(Label* call_runtime);
 
   // AllocationMemento support. Arrays may have an associated
   // AllocationMemento object that can be checked for in order to pretransition
@@ -1461,8 +1493,6 @@ class MacroAssembler: public Assembler {
   // Helper functions for generating invokes.
   void InvokePrologue(const ParameterCount& expected,
                       const ParameterCount& actual,
-                      Handle<Code> code_constant,
-                      Register code_reg,
                       Label* done,
                       bool* definitely_mismatches,
                       InvokeFlag flag,
@@ -1492,6 +1522,16 @@ class MacroAssembler: public Assembler {
   MemOperand SafepointRegisterSlot(Register reg);
   MemOperand SafepointRegistersAndDoublesSlot(Register reg);
 
+  // Implementation helpers for FloatMin and FloatMax.
+  template <typename T>
+  void FloatMaxHelper(T result, T left, T right, Label* out_of_line);
+  template <typename T>
+  void FloatMinHelper(T result, T left, T right, Label* out_of_line);
+  template <typename T>
+  void FloatMaxOutOfLineHelper(T result, T left, T right);
+  template <typename T>
+  void FloatMinOutOfLineHelper(T result, T left, T right);
+
   bool generating_stub_;
   bool has_frame_;
   // This handle will be patched with the code object on installation.
@@ -1515,8 +1555,7 @@ class CodePatcher {
     DONT_FLUSH
   };
 
-  CodePatcher(byte* address,
-              int instructions,
+  CodePatcher(Isolate* isolate, byte* address, int instructions,
               FlushICache flush_cache = FLUSH);
   ~CodePatcher();
 
@@ -1544,26 +1583,18 @@ class CodePatcher {
 // -----------------------------------------------------------------------------
 // Static helper functions.
 
-inline MemOperand ContextOperand(Register context, int index = 0) {
+inline MemOperand ContextMemOperand(Register context, int index = 0) {
   return MemOperand(context, Context::SlotOffset(index));
 }
 
 
-inline MemOperand GlobalObjectOperand()  {
-  return ContextOperand(cp, Context::GLOBAL_OBJECT_INDEX);
+inline MemOperand NativeContextMemOperand() {
+  return ContextMemOperand(cp, Context::NATIVE_CONTEXT_INDEX);
 }
 
-
-#ifdef GENERATED_CODE_COVERAGE
-#define CODE_COVERAGE_STRINGIFY(x) #x
-#define CODE_COVERAGE_TOSTRING(x) CODE_COVERAGE_STRINGIFY(x)
-#define __FILE_LINE__ __FILE__ ":" CODE_COVERAGE_TOSTRING(__LINE__)
-#define ACCESS_MASM(masm) masm->stop(__FILE_LINE__); masm->
-#else
 #define ACCESS_MASM(masm) masm->
-#endif
 
-
-} }  // namespace v8::internal
+}  // namespace internal
+}  // namespace v8
 
 #endif  // V8_ARM_MACRO_ASSEMBLER_ARM_H_

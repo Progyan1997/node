@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --harmony-simd --harmony-tostring  --harmony-reflect
+// Flags: --harmony-simd
 // Flags: --allow-natives-syntax --expose-natives-as natives --noalways-opt
 
 function lanesForType(typeName) {
@@ -337,8 +337,8 @@ function TestEquality(type, lanes) {
   assertTrue(instance == instance)
   assertFalse(instance === Object(instance))
   assertFalse(Object(instance) === instance)
-  assertFalse(instance == Object(instance))
-  assertFalse(Object(instance) == instance)
+  assertTrue(instance == Object(instance))
+  assertTrue(Object(instance) == instance)
   assertTrue(instance === instance.valueOf())
   assertTrue(instance.valueOf() === instance)
   assertTrue(instance == instance.valueOf())
@@ -406,8 +406,8 @@ function TestEquality(type, lanes) {
 function TestSameValue(type, lanes) {
   var simdFn = SIMD[type];
   var instance = createInstance(type);
-  var sameValue = natives.$sameValue;
-  var sameValueZero = natives.$sameValueZero;
+  var sameValue = Object.is
+  var sameValueZero = function(x, y) { return %SameValueZero(x, y); }
 
   // SIMD values should not be the same as instances of different types.
   checkTypeMatrix(type, function(other) {
@@ -618,3 +618,19 @@ function TestSIMDObject() {
   assertSame(SIMD.Bool8x16, undefined);
 }
 TestSIMDObject()
+
+
+function TestStringify(expected, input) {
+  assertEquals(expected, JSON.stringify(input));
+  assertEquals(expected, JSON.stringify(input, (key, value) => value));
+  assertEquals(JSON.stringify(input, null, "="),
+               JSON.stringify(input, (key, value) => value, "="));
+}
+
+TestStringify(undefined, SIMD.Float32x4(1, 2, 3, 4));
+TestStringify('[null]', [SIMD.Float32x4(1, 2, 3, 4)]);
+TestStringify('[{}]', [Object(SIMD.Float32x4(1, 2, 3, 4))]);
+var simd_wrapper = Object(SIMD.Float32x4(1, 2, 3, 4));
+TestStringify('{}', simd_wrapper);
+simd_wrapper.a = 1;
+TestStringify('{"a":1}', simd_wrapper);
